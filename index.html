@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GreenRoute</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Hamburger Icon -->
+  <div id="hamburger">☰</div>
+
+  <!-- Home Sidebar -->
+  <div id="homeSidebar" class="hidden">
+    <h2>🌿 GreenRoute</h2>
+    <button onclick="showHome()">Home</button>
+    <button onclick="showMap()">Map</button>
+  </div>
+
+  <!-- Home Screen -->
+  <div id="homeScreen">
+    <h1>🌱 Choose a Greener Path</h1>
+    <p>Make smarter travel decisions for a better tomorrow.</p>
+    <div class="process-flow">
+      <div class="step" onclick="showContent('step1')">
+        <img src="first.jpg" alt="Step 1">
+        <p>Understand Impact</p>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="step" onclick="showContent('step2')">
+        <img src="emission.jpg" alt="Step 2">
+        <p>Calculate Emissions</p>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="step" onclick="showContent('step3')">
+        <img src="route.jpg" alt="Step 3">
+        <p>Choose Green Route</p>
+      </div>
+      <div class="arrow">⟶</div>
+      <div class="step" onclick="showContent('step4')">
+        <img src="img1.jpg" alt="Step 4">
+        <p>Reduce CO₂</p>
+      </div>
+    </div>
+
+    <div id="step1" class="step-content">
+      <h2>Step 1: Understand Your Environmental Impact</h2>
+      <p>Learn how different transportation methods contribute to carbon emissions and their effects on the planet.</p>
+    </div>
+    <div id="step2" class="step-content">
+      <h2>Step 2: Calculate Emissions</h2>
+      <p>Input your travel details and get an instant estimate of your journey's CO₂ emissions.</p>
+    </div>
+    <div id="step3" class="step-content">
+      <h2>Step 3: Choose a Green Route</h2>
+      <p>Explore eco-friendly route options that reduce fuel consumption and pollution.</p>
+    </div>
+    <div id="step4" class="step-content">
+      <h2>Step 4: Reduce Carbon Footprint</h2>
+      <p>Adopt sustainable travel habits and make a positive impact on the environment.</p>
+    </div>
+  </div>
+  
+
+  <!-- Map Container -->
+  <div id="mapContainer">
+    <div id="sidebar">
+      <h2>🌿 GreenRoute</h2>
+      <div class="form-group">
+        <input type="text" id="source" placeholder="Enter Source" />
+      </div>
+      <div class="form-group">
+        <input type="text" id="destination" placeholder="Enter Destination" />
+      </div>
+      <div class="form-group">
+        <select id="vehicleType">
+          <option value="petrol">Petrol Car</option>
+          <option value="diesel">Diesel Car</option>
+          <option value="electric">Electric Car</option>
+          <option value="bike">Bike/Motorcycle</option>
+          <option value="bus">Bus</option>
+          <option value="truck">Truck</option>
+          <option value="electric_truck">Electric Truck</option>
+          <option value="walking">Walking</option>
+          <option value="cycling">Cycling</option>
+        </select>
+      </div>
+      <div class="form-group">
+  <input type="number" id="vehicleYear" placeholder="Enter Vehicle Make Year" min="1980" max="2025" />
+</div>
+
+      <div class="form-group">
+        <button onclick="findRoute()">Find Route</button>
+      </div>
+      <div class="form-group">
+        <button onclick="showHome()">⬅ Back to Home</button>
+      </div>
+    </div>
+    <div id="map"></div>
+    <div id="info-box">---</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="map.js"></script>
+  <script>
+    function showContent(id) {
+      document.querySelectorAll('.step-content').forEach(div => div.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+  </script>
+  <footer id="footer">
+    <div class="footer-content">
+      <p>🌿 GreenRoute &copy; 2025 — Drive Clean. Live Green.</p>
+      <p>Crafted with care for a sustainable future 🌍</p>
+    </div>
+  </footer>
+</body>
+</html>

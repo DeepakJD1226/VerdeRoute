@@ -254,6 +254,13 @@ async function findRoute() {
   infoHTML += `<br><strong style="color:green;">Eco Tip:</strong> ${ecoTip}`;
 
   document.getElementById("info-box").innerHTML = infoHTML;
+
+  // try to refresh recent list on home screen if present
+  try {
+    if (typeof loadRecent === 'function') {
+      loadRecent();
+    }
+  } catch (_) {}
 }
 
 
@@ -263,12 +270,30 @@ document.addEventListener("DOMContentLoaded", () => {
   const sidebar = document.getElementById("sidebar");
   const homeSidebar = document.getElementById("homeSidebar");
   const mapContainer = document.getElementById("mapContainer");
+  const overlay = document.getElementById("sidebarOverlay");
+
+  // Close buttons inside both sidebars
+  const closeButtons = document.querySelectorAll('.close-btn');
+  closeButtons.forEach(btn => btn.addEventListener('click', () => {
+    sidebar.classList.remove('open');
+    homeSidebar.classList.add('hidden');
+    overlay.classList.remove('show');
+  }));
 
   hamburger.addEventListener("click", () => {
     if (mapContainer.style.display === "block") {
       sidebar.classList.toggle("open");
+      overlay.classList.toggle('show', sidebar.classList.contains('open'));
     } else {
       homeSidebar.classList.toggle("hidden");
+      overlay.classList.toggle('show', !homeSidebar.classList.contains('hidden'));
     }
+  });
+
+  // Clicking overlay closes any open sidebar
+  overlay.addEventListener('click', () => {
+    sidebar.classList.remove('open');
+    homeSidebar.classList.add('hidden');
+    overlay.classList.remove('show');
   });
 });

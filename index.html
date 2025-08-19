@@ -11,11 +11,22 @@
   <!-- Hamburger Icon -->
   <div id="hamburger">☰</div>
 
+  <!-- Overlay -->
+  <div id="sidebarOverlay"></div>
+
   <!-- Home Sidebar -->
-  <div id="homeSidebar" class="hidden">
-    <h2>🌿 GreenRoute</h2>
-    <button onclick="showHome()">Home</button>
-    <button onclick="showMap()">Map</button>
+  <div id="homeSidebar" class="hidden" aria-label="Home navigation sidebar">
+    <div class="sidebar-header">
+      <div class="brand"><span class="logo">🌿</span><span>GreenRoute</span></div>
+      <button class="close-btn" aria-label="Close">×</button>
+    </div>
+    <nav class="sidebar-nav" role="navigation">
+      <button class="nav-btn" onclick="showHome()">Home</button>
+      <button class="nav-btn" onclick="showMap()">Map</button>
+    </nav>
+    <div class="sidebar-footer">
+      <small>Drive clean. Live green.</small>
+    </div>
   </div>
 
   <!-- Home Screen -->
@@ -44,6 +55,65 @@
       </div>
     </div>
 
+    <!-- Rich content sections -->
+    <section class="content-grid">
+      <article class="card">
+        <h3>Why Green Routing?</h3>
+        <p>Optimizing your route can cut fuel usage and emissions while saving time and money. We analyze distance, traffic, and mode to suggest cleaner choices.</p>
+        <ul class="tick-list">
+          <li>Lower CO₂ footprint per trip</li>
+          <li>Smart alternatives based on distance</li>
+          <li>Healthier, active options for short trips</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h3>How It Works</h3>
+        <p>Enter your source, destination and vehicle details. We calculate emissions, estimate time, and show alternatives like public transport, cycling or EVs.</p>
+        <div class="kpis">
+          <div><span class="kpi">90%</span><small>cut by switching to EVs</small></div>
+          <div><span class="kpi">0g</span><small>for walking/cycling</small></div>
+          <div><span class="kpi">2x</span><small>health benefits</small></div>
+        </div>
+      </article>
+      <article class="card">
+        <h3>Tips to Drive Greener</h3>
+        <ul class="tick-list">
+          <li>Maintain steady speeds and avoid idling</li>
+          <li>Keep tires inflated and vehicle serviced</li>
+          <li>Carpool or take public transport when possible</li>
+          <li>Plan routes to avoid congestion hotspots</li>
+        </ul>
+      </article>
+    </section>
+
+    <!-- Recent routes & theme toggle -->
+    <section class="utilities">
+      <div class="utility-head">
+        <h3>Recent Routes</h3>
+        <div class="utility-actions">
+          <button id="refreshRecent" class="mini-btn">Refresh</button>
+          <button id="themeToggle" class="mini-btn" aria-label="Toggle theme">🌙</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="recentTable">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>From → To</th>
+              <th>Mode</th>
+              <th>Dist (km)</th>
+              <th>CO₂ (g)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="5">No data yet. Plan a route to see history.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">Tip: Press <kbd>H</kbd> to open Home menu, <kbd>M</kbd> for Map, and <kbd>/</kbd> to focus the Source field.</p>
+    </section>
+
     <div id="step1" class="step-content">
       <h2>Step 1: Understand Your Environmental Impact</h2>
       <p>Learn how different transportation methods contribute to carbon emissions and their effects on the planet.</p>
@@ -65,8 +135,11 @@
 
   <!-- Map Container -->
   <div id="mapContainer">
-    <div id="sidebar">
-      <h2>🌿 GreenRoute</h2>
+    <div id="sidebar" aria-label="Route options sidebar">
+      <div class="sidebar-header">
+        <div class="brand"><span class="logo">🌿</span><span>GreenRoute</span></div>
+        <button class="close-btn" aria-label="Close">×</button>
+      </div>
       <div class="form-group">
         <input type="text" id="source" placeholder="Enter Source" />
       </div>
@@ -108,6 +181,54 @@
       document.querySelectorAll('.step-content').forEach(div => div.classList.remove('active'));
       document.getElementById(id).classList.add('active');
     }
+
+    // Load recent routes
+    async function loadRecent() {
+      try {
+        const res = await fetch('http://localhost:5000/recent-routes?limit=8');
+        const data = await res.json();
+        const tbody = document.querySelector('#recentTable tbody');
+        if (!data.items || data.items.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="5">No data yet. Plan a route to see history.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.items.map(r => {
+          const d = new Date(r.date);
+          const ds = d.toLocaleDateString();
+          const trip = `${r.source} → ${r.destination}`;
+          const dist = typeof r.distance === 'number' ? r.distance.toFixed(2) : r.distance;
+          const co2 = typeof r.emissions === 'number' ? r.emissions.toFixed(2) : r.emissions;
+          return `<tr><td>${ds}</td><td>${trip}</td><td>${r.vehicleType}</td><td>${dist}</td><td>${co2}</td></tr>`;
+        }).join('');
+      } catch (e) {
+        console.error('recent load', e);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadRecent();
+      const refreshBtn = document.getElementById('refreshRecent');
+      if (refreshBtn) refreshBtn.addEventListener('click', loadRecent);
+
+      // Theme toggle
+      const toggle = document.getElementById('themeToggle');
+      if (toggle) {
+        toggle.addEventListener('click', () => {
+          document.documentElement.classList.toggle('dark');
+          toggle.textContent = document.documentElement.classList.contains('dark') ? '☀️' : '🌙';
+        });
+      }
+
+      // Keyboard shortcuts
+      document.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'h') { document.getElementById('hamburger').click(); }
+        if (e.key.toLowerCase() === 'm') { showMap(); }
+        if (e.key === '/') {
+          const el = document.getElementById('source');
+          if (el) { e.preventDefault(); el.focus(); }
+        }
+      });
+    });
   </script>
   <footer id="footer">
     <div class="footer-content">

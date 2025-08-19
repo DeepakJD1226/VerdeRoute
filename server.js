@@ -102,6 +102,18 @@ app.post("/save-route", async (req, res) => {
   }
 });
 
+// ==== RECENT ROUTES ====
+app.get('/recent-routes', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '10', 10), 50);
+    const items = await RouteData.find().sort({ date: -1 }).limit(limit).lean();
+    res.json({ items });
+  } catch (err) {
+    console.error(' Recent routes error:', err);
+    res.status(500).json({ error: 'Failed to load recent routes' });
+  }
+});
+
 // ==== ROOT ====
 app.get('/', (req, res) => {
   res.send('GreenRoute backend is running');

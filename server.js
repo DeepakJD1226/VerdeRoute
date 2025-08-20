@@ -26,6 +26,7 @@ const routeSchema = new mongoose.Schema({
   vehicleYear: Number,
   distance: Number,
   emissions: Number,
+  routeSource: { type: String, default: 'OSM' },
   date: { type: Date, default: Date.now }
 });
 
@@ -79,7 +80,7 @@ app.post('/suggest', (req, res) => {
 // ==== SAVE ROUTE TO MONGODB ====
 app.post("/save-route", async (req, res) => {
   try {
-    const { source, destination, vehicleType, vehicleYear, distance, emissions } = req.body;
+    const { source, destination, vehicleType, vehicleYear, distance, emissions, routeSource } = req.body;
 
     if (!source || !destination || !vehicleType || !vehicleYear || !distance || emissions === undefined) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -91,7 +92,8 @@ app.post("/save-route", async (req, res) => {
       vehicleType,
       vehicleYear,
       distance,
-      emissions
+      emissions,
+      routeSource: typeof routeSource === 'string' ? routeSource : 'OSM'
     });
 
     const savedRoute = await newRoute.save();

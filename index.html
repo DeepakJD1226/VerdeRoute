@@ -122,7 +122,7 @@
           </tbody>
         </table>
       </div>
-      <p class="hint">Tip: Press <kbd>H</kbd> to open Home menu, <kbd>M</kbd> for Map, <kbd>T</kbd> for Tourist Route, and <kbd>/</kbd> to focus the Source field.</p>
+      <p class="hint">Tip: Press <kbd>Ctrl</kbd>+<kbd>H</kbd> for Home, <kbd>Ctrl</kbd>+<kbd>M</kbd> for Map, <kbd>T</kbd> for Tourist Route, and <kbd>/</kbd> to focus the Source field.</p>
     </section>
 
     <div id="step1" class="step-content">
@@ -239,19 +239,22 @@
       document.addEventListener('keydown', (e) => {
         const key = (e && typeof e.key === 'string') ? e.key.toLowerCase() : '';
         if (!key) return;
-        if (key === 'h') { document.getElementById('hamburger').click(); }
-        if (key === 'm') { showMap(); }
-        if (key === 't') { 
-          showMap(); 
+        // Ctrl+H → Home
+        if (e.ctrlKey && key === 'h') { e.preventDefault(); showHome(); }
+        // Ctrl+M → Map
+        if (e.ctrlKey && key === 'm') { e.preventDefault(); showMap(); }
+        // T → Tourist route helper (unchanged)
+        if (!e.ctrlKey && key === 't') {
+          showMap();
           setTimeout(() => {
             if (typeof findTouristRoute === 'function') {
-              // Focus on destination field for tourist route
               const destEl = document.getElementById('destination');
               if (destEl) destEl.focus();
             }
           }, 500);
         }
-        if (key === '/') {
+        // / → focus Source
+        if (!e.ctrlKey && key === '/') {
           const el = document.getElementById('source');
           if (el) { e.preventDefault(); el.focus(); }
         }

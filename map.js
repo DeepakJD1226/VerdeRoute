@@ -66,6 +66,51 @@ const TOURIST_CATEGORIES = {
   markets: { key: 'markets', label: 'Markets', emoji: '🏪', color: '#FF9800' }
 };
 
+// ==== TomTom Integration Config (added) ====
+const TOMTOM_CONFIG = {
+  PRIMARY_KEY: '87ed92c52fd2fea74165fc67a34bf35582656cbd712ee5591ed20e88489ca394',
+  SECONDARY_KEY: 'AZKtYdDL9LY5v4vy367AIZI0rzSiuN3Z',
+  COUNTRY_SET: 'IN',
+  BASE_URL: 'https://api.tomtom.com/search/2'
+};
+
+// Map TomTom categories/queries to our TOURIST_CATEGORIES keys
+const TOMTOM_CATEGORY_MAP = {
+  restaurants: 'restaurant',
+  hotels: 'hotel',
+  monuments: 'tourist_attraction',
+  ev: 'ev station',
+  hospitals: 'hospital',
+  atms: 'atm',
+  toilets: 'toilet',
+  cafes: 'cafe',
+  cinemas: 'cinema',
+  malls: 'shopping mall',
+  markets: 'market',
+  fuel: 'fuel station',
+  parks: 'park',
+  gardens: 'garden',
+  beaches: 'beach',
+  rivers: 'river',
+  lakes: 'lake',
+  forests: 'forest',
+  museums: 'museum',
+  palaces: 'palace',
+  forts: 'castle'
+};
+
+// Last data-source state for UI indication (no signature changes downstream)
+let lastTouristDataEnhanced = false;
+let lastGeocodeProvider = 'osm';
+let WEATHER_PROVIDER = 'unknown';
+let TRAFFIC_KEY = null;
+let WEATHER_KEY = null;
+let apiRoleDetectionRan = false;
+let trafficTileLayers = [];
+let lastTrafficWeatherHtml = '';
+const imageCache = new Map();
+const markerByPlaceId = new Map();
+
 // Helper: build a category-specific Leaflet DivIcon
 function buildTouristDivIcon(categoryKey) {
   const cat = TOURIST_CATEGORIES[categoryKey] || { emoji: '📍', color: '#2e7d32' };
@@ -77,6 +122,485 @@ function buildTouristDivIcon(categoryKey) {
     iconSize: [30, 30],
     iconAnchor: [15, 15]
   });
+}
+
+// ==== TomTom Helpers (added) ====
+function getTomTomKeyPair() {
+  return [TOMTOM_CONFIG.PRIMARY_KEY, TOMTOM_CONFIG.SECONDARY_KEY].filter(Boolean);
+}
+
+async function tomtomGeocode(query, key) {
+  const center = map && typeof map.getCenter === 'function' ? map.getCenter() : null;
+  const bias = center ? `&lat=${center.lat}&lon=${center.lng}` : '';
+  const url = `${TOMTOM_CONFIG.BASE_URL}/search/${encodeURIComponent(query)}.json?key=${encodeURIComponent(key)}&countrySet=${encodeURIComponent(TOMTOM_CONFIG.COUNTRY_SET)}&limit=1${bias}`;
+  const res = await fetchWithTimeout(url, {}, 12000);
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (!data || !Array.isArray(data.results) || data.results.length === 0) return null;
+  const pos = data.results[0] && data.results[0].position;
+  if (!pos || !isFinite(pos.lat) || !isFinite(pos.lon)) return null;
+  return [pos.lat, pos.lon];
+}
+
+// Try TomTom first, fall back to existing geocode()
+async function enhancedGeocode(location) {
+  const trimmed = (location || '').trim();
+  if (!trimmed) return null;
+  try {
+    const [primary, secondary] = getTomTomKeyPair();
+    if (primary) {
+      try {
+        const c1 = await tomtomGeocode(trimmed, primary);
+        if (c1) { lastGeocodeProvider = 'tomtom'; return c1; }
+      } catch (e) { console.warn('TomTom geocode primary failed', e); }
+    }
+    if (secondary) {
+      try {
+        const c2 = await tomtomGeocode(trimmed, secondary);
+        if (c2) { lastGeocodeProvider = 'tomtom'; return c2; }
+      } catch (e) { console.warn('TomTom geocode secondary failed', e); }
+    }
+  } catch (_) {}
+  // Fallback to existing pipeline
+  const fallback = await geocode(location);
+  if (fallback) { lastGeocodeProvider = 'osm'; }
+  return fallback;
+}
+
+// Sample a few points along route to limit TomTom requests
+function sampleRoutePoints(routeGeometry, maxSamples = 6) {
+  const coords = (routeGeometry && routeGeometry.coordinates) || [];
+  if (coords.length === 0) return [];
+  const step = Math.max(1, Math.floor(coords.length / maxSamples));
+  const out = [];
+  for (let i = 0; i < coords.length && out.length < maxSamples; i += step) {
+    const [lon, lat] = coords[i];
+    out.push({ lat, lon });
+  }
+  // ensure last point included
+  if (out.length && (out[out.length - 1].lat !== coords[coords.length - 1][1] || out[out.length - 1].lon !== coords[coords.length - 1][0])) {
+    const [lon, lat] = coords[coords.length - 1];
+    out.push({ lat, lon });
+  }
+  return out;
+}
+
+function normalizeTomTomResultToPlace(result, categoryKey) {
+  const name = (result && result.poi && result.poi.name) || 'Unnamed';
+  const pos = result && result.position ? result.position : null;
+  const lat = pos ? pos.lat : null;
+  const lon = pos ? pos.lon : null;
+  const phone = (result && result.poi && result.poi.phone) || (result && result.poi && result.poi.phoneNumber);
+  const url = (result && result.poi && result.poi.url) || (result && result.poi && result.poi.website);
+  const address = (result && result.address && (result.address.freeformAddress || result.address.streetName)) || '';
+  const id = (result && (result.id || (name + '_' + (lat || '') + '_' + (lon || '')))) || Math.random().toString(36).slice(2);
+  return {
+    id: `tomtom/${id}`,
+    lat,
+    lon,
+    name,
+    tags: {
+      source: 'tomtom',
+      phone: phone || undefined,
+      website: url || undefined,
+      addr_full: address || undefined,
+      opening_hours: undefined
+    },
+    category: categoryKey
+  };
+}
+
+async function fetchTomTomCategoryNear(lat, lon, categoryKey, key) {
+  const categoryQuery = TOMTOM_CATEGORY_MAP[categoryKey];
+  if (!categoryQuery) return [];
+  const url = `${TOMTOM_CONFIG.BASE_URL}/categorySearch/${encodeURIComponent(categoryQuery)}.json?key=${encodeURIComponent(key)}&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&radius=1000&limit=10`;
+  try {
+    const res = await fetchWithTimeout(url, {}, 12000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data || !Array.isArray(data.results)) return [];
+    return data.results.map(r => normalizeTomTomResultToPlace(r, categoryKey)).filter(p => isFinite(p.lat) && isFinite(p.lon));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fetchTomTomPOIs(routeGeometry, vehicleType, existingGrouped) {
+  const points = sampleRoutePoints(routeGeometry, 6);
+  if (!points.length) return { grouped: {}, flat: [], enhanced: false };
+  const [primary, secondary] = getTomTomKeyPair();
+  const keyToUse = primary || secondary;
+  if (!keyToUse) return { grouped: {}, flat: [], enhanced: false };
+
+  // Limit categories to avoid hitting daily limits; skip categories already saturated from OSM
+  const categoryKeys = Object.keys(TOMTOM_CATEGORY_MAP).filter(key => {
+    const arr = existingGrouped && existingGrouped[key];
+    return !arr || arr.length < 15;
+  });
+
+  // If EV, ensure we include charging stations first
+  const orderedCats = vehicleType === 'electric'
+    ? ['ev', ...categoryKeys.filter(k => k !== 'ev')]
+    : categoryKeys;
+
+  const aggregate = [];
+  let anySuccess = false;
+  for (const p of points) {
+    for (const cat of orderedCats) {
+      // soft cap to keep requests in check
+      if (aggregate.length > 500) break;
+      try {
+        const items = await fetchTomTomCategoryNear(p.lat, p.lon, cat, keyToUse);
+        if (items && items.length) { anySuccess = true; aggregate.push(...items); }
+      } catch (_) {}
+    }
+  }
+  const deduped = dedupeByLocation(aggregate);
+
+  // group by categoryKey in our structure and respect per-category cap
+  const grouped = {};
+  for (const key of Object.keys(TOURIST_CATEGORIES)) grouped[key] = [];
+  for (const place of deduped) {
+    const key = place.category;
+    if (!grouped[key]) grouped[key] = [];
+    if (grouped[key].length < 15) grouped[key].push(place);
+  }
+  const flat = Object.values(grouped).flat();
+  return { grouped, flat, enhanced: anySuccess };
+}
+
+// ==== Traffic & Weather Autodetect and Fetch (added) ====
+async function tryTomTomTrafficKey(key) {
+  try {
+    const testUrl = `https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json?point=12.9716,77.5946&key=${encodeURIComponent(key)}`;
+    const res = await fetchWithTimeout(testUrl, {}, 8000);
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!(data && data.flowSegmentData);
+  } catch (_) { return false; }
+}
+
+async function tryOpenWeatherKey(key) {
+  try {
+    const url = `https://api.openweathermap.org/data/2.5/weather?lat=12.9716&lon=77.5946&appid=${encodeURIComponent(key)}&units=metric`;
+    const res = await fetchWithTimeout(url, {}, 8000);
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!(data && data.main && typeof data.main.temp === 'number');
+  } catch (_) { return false; }
+}
+
+async function tryTomorrowKey(key) {
+  try {
+    const url = `https://api.tomorrow.io/v4/weather/realtime?location=12.9716,77.5946&units=metric&apikey=${encodeURIComponent(key)}`;
+    const res = await fetchWithTimeout(url, {}, 8000);
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!(data && data.data && data.data.values && typeof data.data.values.temperature === 'number');
+  } catch (_) { return false; }
+}
+
+async function tryWeatherbitKey(key) {
+  try {
+    const url = `https://api.weatherbit.io/v2.0/current?lat=12.9716&lon=77.5946&key=${encodeURIComponent(key)}`;
+    const res = await fetchWithTimeout(url, {}, 8000);
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!(data && data.data && Array.isArray(data.data) && data.data.length > 0 && typeof data.data[0].temp === 'number');
+  } catch (_) { return false; }
+}
+
+async function ensureApiKeyRoles() {
+  if (apiRoleDetectionRan) return;
+  apiRoleDetectionRan = true;
+  const keys = getTomTomKeyPair();
+  const k1 = keys[0] || null;
+  const k2 = keys[1] || null;
+  // Detect traffic key (TomTom)
+  if (k1 && await tryTomTomTrafficKey(k1)) TRAFFIC_KEY = k1;
+  else if (k2 && await tryTomTomTrafficKey(k2)) TRAFFIC_KEY = k2;
+  else TRAFFIC_KEY = k1 || k2 || null;
+
+  // Detect weather provider for the remaining key
+  const candidates = [k1, k2].filter(k => k && k !== TRAFFIC_KEY);
+  // Allow traffic key to double as weather key if needed
+  if (TRAFFIC_KEY) candidates.push(TRAFFIC_KEY);
+  for (const key of candidates) {
+    if (await tryOpenWeatherKey(key)) { WEATHER_PROVIDER = 'openweather'; WEATHER_KEY = key; break; }
+    if (await tryTomorrowKey(key)) { WEATHER_PROVIDER = 'tomorrow'; WEATHER_KEY = key; break; }
+    if (await tryWeatherbitKey(key)) { WEATHER_PROVIDER = 'weatherbit'; WEATHER_KEY = key; break; }
+  }
+  if (!WEATHER_PROVIDER || WEATHER_PROVIDER === 'unknown') {
+    WEATHER_PROVIDER = 'none'; WEATHER_KEY = null;
+  }
+}
+
+async function fetchTrafficSummary(routeGeometry) {
+  try {
+    if (!TRAFFIC_KEY) return null;
+    const points = sampleRoutePoints(routeGeometry, 3);
+    if (!points.length) return null;
+    let totalSpeed = 0, totalFree = 0, count = 0;
+    for (const p of points) {
+      const url = `https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json?point=${p.lat},${p.lon}&key=${encodeURIComponent(TRAFFIC_KEY)}`;
+      const res = await fetchWithTimeout(url, {}, 8000);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const seg = data && data.flowSegmentData;
+      if (seg && typeof seg.currentSpeed === 'number' && typeof seg.freeFlowSpeed === 'number') {
+        totalSpeed += seg.currentSpeed;
+        totalFree += seg.freeFlowSpeed;
+        count++;
+      }
+    }
+    if (!count) return null;
+    const avgSpeed = totalSpeed / count;
+    const avgFree = totalFree / count;
+    const congestion = avgFree > 0 ? Math.max(0, Math.min(1, 1 - (avgSpeed / avgFree))) : 0;
+    return { avgSpeed: Math.round(avgSpeed), avgFree: Math.round(avgFree), congestion }; // congestion 0..1
+  } catch (_) { return null; }
+}
+
+async function fetchWeather(lat, lon) {
+  if (!WEATHER_KEY || WEATHER_PROVIDER === 'none') return null;
+  try {
+    if (WEATHER_PROVIDER === 'openweather') {
+      const url = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${encodeURIComponent(WEATHER_KEY)}&units=metric`;
+      const res = await fetchWithTimeout(url, {}, 8000);
+      if (!res.ok) return null;
+      const d = await res.json();
+      const w = (d.weather && d.weather[0]) || {};
+      return {
+        tempC: d.main && d.main.temp,
+        description: w.description || 'Weather',
+        windKph: d.wind && typeof d.wind.speed === 'number' ? Math.round(d.wind.speed * 3.6) : undefined,
+        precipMm: d.rain && (d.rain['1h'] || d.rain['3h'])
+      };
+    }
+    if (WEATHER_PROVIDER === 'tomorrow') {
+      const url = `https://api.tomorrow.io/v4/weather/realtime?location=${lat},${lon}&units=metric&apikey=${encodeURIComponent(WEATHER_KEY)}`;
+      const res = await fetchWithTimeout(url, {}, 8000);
+      if (!res.ok) return null;
+      const d = await res.json();
+      const v = d && d.data && d.data.values || {};
+      return {
+        tempC: v.temperature,
+        description: typeof v.weatherCode === 'number' ? `Code ${v.weatherCode}` : 'Weather',
+        windKph: typeof v.windSpeed === 'number' ? Math.round(v.windSpeed) : undefined,
+        precipMm: typeof v.precipitationIntensity === 'number' ? v.precipitationIntensity : undefined
+      };
+    }
+    if (WEATHER_PROVIDER === 'weatherbit') {
+      const url = `https://api.weatherbit.io/v2.0/current?lat=${lat}&lon=${lon}&key=${encodeURIComponent(WEATHER_KEY)}`;
+      const res = await fetchWithTimeout(url, {}, 8000);
+      if (!res.ok) return null;
+      const d = await res.json();
+      const w = d && d.data && d.data[0] || {};
+      return {
+        tempC: w.temp,
+        description: w.weather && w.weather.description,
+        windKph: w.wind_spd ? Math.round(w.wind_spd * 3.6) : undefined,
+        precipMm: w.precip
+      };
+    }
+  } catch (_) { return null; }
+  return null;
+}
+
+async function fetchWeatherAlongRoute(routeGeometry) {
+  try {
+    const pts = sampleRoutePoints(routeGeometry, 3);
+    const out = [];
+    for (const p of pts) {
+      const w = await fetchWeather(p.lat, p.lon);
+      if (w) out.push({ lat: p.lat, lon: p.lon, ...w });
+    }
+    return out;
+  } catch (_) { return []; }
+}
+
+function addTrafficTileOverlays() {
+  try {
+    if (!TRAFFIC_KEY || !map) return;
+    // Remove previous
+    for (const l of trafficTileLayers) { try { map.removeLayer(l); } catch(_){} }
+    trafficTileLayers = [];
+    const flow = L.tileLayer(`https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=${encodeURIComponent(TRAFFIC_KEY)}`, { opacity: 0.65 });
+    const incidents = L.tileLayer(`https://api.tomtom.com/traffic/map/4/tile/incidents/{z}/{x}/{y}.png?key=${encodeURIComponent(TRAFFIC_KEY)}`, { opacity: 0.8 });
+    flow.addTo(map); incidents.addTo(map);
+    trafficTileLayers.push(flow, incidents);
+    // track to cleanup with route
+    routeLayers.push(flow, incidents);
+  } catch (_) {}
+}
+
+function buildTrafficWeatherSnippet(trafficSummary, weatherPoints) {
+  let html = '';
+  if (trafficSummary) {
+    const t = getTrafficSeverity(trafficSummary.congestion);
+    const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${t.color};margin-right:6px;vertical-align:middle;"></span>`;
+    html += `<div style="margin-top:6px;">${dot}<strong>Traffic:</strong> ${t.level} (avg ${trafficSummary.avgSpeed} km/h vs free ${trafficSummary.avgFree} km/h)</div>`;
+  }
+  if (weatherPoints && weatherPoints.length) {
+    const w = weatherPoints[0];
+    const parts = [];
+    const ws = getWeatherSeverity(w);
+    const dotW = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${ws.color};margin-right:6px;vertical-align:middle;"></span>`;
+    if (typeof w.tempC === 'number') parts.push(`${Math.round(w.tempC)}°C`);
+    if (w.description) parts.push(w.description);
+    if (typeof w.windKph === 'number') parts.push(`wind ${w.windKph} km/h`);
+    if (typeof w.precipMm === 'number') parts.push(`${w.precipMm} mm`);
+    html += `<div style="margin-top:4px;">${dotW}<strong>Weather:</strong> ${ws.level}${parts.length ? ` — ${parts.join(', ')}` : ''}${WEATHER_PROVIDER && WEATHER_PROVIDER !== 'none' ? ` <small>(${WEATHER_PROVIDER})</small>` : ''}</div>`;
+  }
+  return html;
+}
+
+// Severity helpers for coloring
+function getTrafficSeverity(congestion) {
+  // congestion 0..1
+  if (typeof congestion !== 'number') return { level: 'Unknown', color: '#9CA3AF' };
+  if (congestion > 0.66) return { level: 'Heavy', color: '#dc2626' }; // red
+  if (congestion > 0.33) return { level: 'Moderate', color: '#f59e0b' }; // yellow
+  return { level: 'Light', color: '#16a34a' }; // green
+}
+
+function getWeatherSeverity(w) {
+  const temp = typeof w.tempC === 'number' ? w.tempC : null;
+  const wind = typeof w.windKph === 'number' ? w.windKph : 0;
+  const precip = typeof w.precipMm === 'number' ? w.precipMm : 0;
+  // Simple heuristic thresholds
+  const extremeTemp = (temp !== null) && (temp >= 38 || temp <= 10);
+  if (precip >= 5 || wind >= 40 || extremeTemp) return { level: 'Severe', color: '#dc2626' };
+  if (precip >= 1 || wind >= 20 || (temp !== null && (temp >= 33 || temp <= 15))) return { level: 'Mild', color: '#f59e0b' };
+  return { level: 'Good', color: '#16a34a' };
+}
+
+// ==== Wikipedia image helpers (no API key needed) ====
+async function fetchWikipediaThumbByTitle(title) {
+  try {
+    if (!title || title.toLowerCase() === 'unnamed') return null;
+    const url = `https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&prop=pageimages&piprop=thumbnail&pithumbsize=300&titles=${encodeURIComponent(title)}`;
+    const res = await fetchWithTimeout(url, {}, 9000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const pages = data && data.query && data.query.pages;
+    if (!pages) return null;
+    for (const k of Object.keys(pages)) {
+      const p = pages[k];
+      if (p && p.thumbnail && p.thumbnail.source) return p.thumbnail.source;
+    }
+    return null;
+  } catch (_) { return null; }
+}
+
+async function fetchWikipediaThumbByGeo(lat, lon, radius = 600) {
+  try {
+    const url = `https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&prop=pageimages|coordinates&piprop=thumbnail&pithumbsize=300&generator=geosearch&ggscoord=${lat}|${lon}&ggsradius=${radius}&ggslimit=8`;
+    const res = await fetchWithTimeout(url, {}, 9000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const pages = data && data.query && data.query.pages;
+    if (!pages) return null;
+    const vals = Object.values(pages);
+    const withThumb = vals.find(v => v && v.thumbnail && v.thumbnail.source);
+    return withThumb ? withThumb.thumbnail.source : null;
+  } catch (_) { return null; }
+}
+
+async function fetchPlaceImage(place) {
+  try {
+    const cacheKey = `${place.name || 'Unnamed'}_${place.lat?.toFixed(4)}_${place.lon?.toFixed(4)}`;
+    if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
+    // 1) If OSM tags include direct image URL
+    const t = place.tags || {};
+    const direct = t.image || t['image:0'] || t['wikimedia_commons'];
+    if (direct && typeof direct === 'string' && direct.startsWith('http')) {
+      imageCache.set(cacheKey, direct);
+      return direct;
+    }
+    // 2) Try Wikipedia by title
+    let img = await fetchWikipediaThumbByTitle(place.name);
+    if (!img) {
+      // 3) Try geo-based search near the place
+      img = await fetchWikipediaThumbByGeo(place.lat, place.lon, 700);
+    }
+    if (img) imageCache.set(cacheKey, img);
+    return img || null;
+  } catch (_) { return null; }
+}
+
+function buildPlacePopupHtml(cat, name, details, osmUrl, lat, lon, imgUrl) {
+  return `
+    <div class="tourist-popup">
+      <div class="popup-head" style="border-bottom-color:${cat ? cat.color : '#2e7d32'};">
+        <span class="emoji">${cat ? cat.emoji : '📍'}</span>
+        <strong>${name}</strong>
+      </div>
+      <div class="popup-body">
+        <div class="popup-cat" style="background:${cat ? cat.color : '#2e7d32'}22; color:${cat ? cat.color : '#2e7d32'}">${cat ? cat.label : 'Place'}</div>
+        ${imgUrl ? `<div style="margin:6px 0 8px 0;"><img src="${imgUrl}" alt="${name}" style="width:100%;height:140px;object-fit:cover;border-radius:8px;" loading="lazy" /></div>` : ''}
+        ${details.length ? `<div class="popup-details">${details.join('<br>')}</div>` : ''}
+      </div>
+      <div class="popup-actions">
+        <button type="button" class="dir-btn" onclick="focusPlace(${lat}, ${lon})">Show Here</button>
+        <a class="osm-link" href="${osmUrl}" target="_blank">OSM</a>
+      </div>
+    </div>
+  `;
+}
+
+// Build colorized route segments based on TomTom flow along the route
+function sampleRoutePointsWithIndex(routeGeometry, maxSamples = 24) {
+  const coords = (routeGeometry && routeGeometry.coordinates) || [];
+  if (coords.length === 0) return [];
+  const step = Math.max(1, Math.floor(coords.length / maxSamples));
+  const out = [];
+  for (let i = 0; i < coords.length; i += step) {
+    const [lon, lat] = coords[i];
+    out.push({ lat, lon, index: i });
+  }
+  if (out[out.length - 1]?.index !== coords.length - 1) {
+    const [lon, lat] = coords[coords.length - 1];
+    out.push({ lat, lon, index: coords.length - 1 });
+  }
+  return out;
+}
+
+async function fetchTrafficSeverityForPoint(lat, lon) {
+  if (!TRAFFIC_KEY) return null;
+  try {
+    const url = `https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json?point=${lat},${lon}&key=${encodeURIComponent(TRAFFIC_KEY)}`;
+    const res = await fetchWithTimeout(url, {}, 8000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const seg = data && data.flowSegmentData;
+    if (!seg || typeof seg.currentSpeed !== 'number' || typeof seg.freeFlowSpeed !== 'number') return null;
+    const congestion = seg.freeFlowSpeed > 0 ? Math.max(0, Math.min(1, 1 - (seg.currentSpeed / seg.freeFlowSpeed))) : 0;
+    return getTrafficSeverity(congestion);
+  } catch (_) { return null; }
+}
+
+async function colorizeRouteByTraffic(routeGeometry, mainLayerToReplace) {
+  try {
+    if (!TRAFFIC_KEY || !map || !routeGeometry || !routeGeometry.coordinates || routeGeometry.coordinates.length < 2) return;
+
+    // Remove the solid main route so segmented colors are visible
+    try { if (mainLayerToReplace) { map.removeLayer(mainLayerToReplace); } } catch(_) {}
+
+    const samples = sampleRoutePointsWithIndex(routeGeometry, 24);
+    for (let i = 0; i < samples.length - 1; i++) {
+      const a = samples[i];
+      const b = samples[i + 1];
+      const midLat = (a.lat + b.lat) / 2;
+      const midLon = (a.lon + b.lon) / 2;
+      let sev = await fetchTrafficSeverityForPoint(midLat, midLon);
+      if (!sev) sev = { color: '#16a34a' }; // default green
+      const segCoords = routeGeometry.coordinates.slice(a.index, b.index + 1).map(([lon, lat]) => [lat, lon]);
+      if (segCoords.length < 2) continue;
+      const segLayer = L.polyline(segCoords, { color: sev.color, weight: 6, opacity: 0.95 }).addTo(map);
+      routeLayers.push(segLayer);
+    }
+  } catch (_) {}
 }
 
 // Helper: compute bbox with small buffer from route geometry
@@ -518,8 +1042,8 @@ async function findRoute() {
     return;
   }
 
-  const sourceCoords = await geocode(sourceText);
-  const destCoords = await geocode(destText);
+  const sourceCoords = await enhancedGeocode(sourceText);
+  const destCoords = await enhancedGeocode(destText);
 
   if (!sourceCoords || !destCoords) {
     alert("Could not locate one or both addresses.");
@@ -598,7 +1122,8 @@ async function findRoute() {
       vehicleYear,
       distance: parseFloat(distance),
       emissions: parseFloat(emissions),
-      ecoTip // Save tip as well
+      ecoTip, // Save tip as well
+      routeSource: lastGeocodeProvider === 'tomtom' ? 'TomTom+OSM' : 'OSM'
     })
   })
     .then(res => res.json())
@@ -606,8 +1131,9 @@ async function findRoute() {
     .catch(err => console.error(" Save error:", err));
 
   // Draw main route
+  // Default route color (will update after traffic detection)
   const mainRouteLayer = L.geoJSON(mainRoute.geometry, {
-    style: { color: "green", weight: 5 }
+    style: { color: "#16a34a", weight: 5 }
   }).addTo(map);
   routeLayers.push(mainRouteLayer);
 
@@ -639,6 +1165,21 @@ async function findRoute() {
 
   // Add eco tip to info box
   infoHTML += `<br><strong style="color:green;">Eco Tip:</strong> ${ecoTip}`;
+
+  // Detect API roles, overlay traffic tiles, and build traffic/weather snippet
+  try { await ensureApiKeyRoles(); } catch(_) {}
+  try { addTrafficTileOverlays(); } catch(_) {}
+  let trafficSummary = null; let weatherPoints = [];
+  try { trafficSummary = await fetchTrafficSummary(mainRoute.geometry); } catch(_) {}
+  try { weatherPoints = await fetchWeatherAlongRoute(mainRoute.geometry); } catch(_) {}
+  lastTrafficWeatherHtml = buildTrafficWeatherSnippet(trafficSummary, weatherPoints);
+  // Replace with segment-by-segment coloring for precise visualization
+  try { await colorizeRouteByTraffic(mainRoute.geometry, mainRouteLayer); } catch(_) {}
+
+  // Show geocoding source info
+  const sourceBadge = lastGeocodeProvider === 'tomtom' ? 'Enhanced with TomTom geocoding' : 'Using OSM geocoding';
+  infoHTML += `<br><small style="opacity:0.8;">${sourceBadge}</small>`;
+  if (lastTrafficWeatherHtml) infoHTML += lastTrafficWeatherHtml;
 
   const box = document.getElementById("info-box");
   box.innerHTML = `
@@ -677,8 +1218,8 @@ async function findTouristRoute() {
     return;
   }
 
-  const sourceCoords = await geocode(sourceText);
-  const destCoords = await geocode(destText);
+  const sourceCoords = await enhancedGeocode(sourceText);
+  const destCoords = await enhancedGeocode(destText);
 
   if (!sourceCoords || !destCoords) {
     alert("Could not locate one or both addresses.");
@@ -726,6 +1267,16 @@ async function findTouristRoute() {
   }).addTo(map);
   routeLayers.push(mainRouteLayer);
 
+  // Traffic + Weather for tourist flow
+  try { await ensureApiKeyRoles(); } catch(_) {}
+  try { addTrafficTileOverlays(); } catch(_) {}
+  let tSummary = null; let wPoints = [];
+  try { tSummary = await fetchTrafficSummary(mainRoute.geometry); } catch(_) {}
+  try { wPoints = await fetchWeatherAlongRoute(mainRoute.geometry); } catch(_) {}
+  lastTrafficWeatherHtml = buildTrafficWeatherSnippet(tSummary, wPoints);
+  // Replace with segment-by-segment coloring for tourist flow
+  try { await colorizeRouteByTraffic(mainRoute.geometry, mainRouteLayer); } catch(_) {}
+
   // Loading state
   document.getElementById("info-box").innerHTML = `
     <div class="info-header">
@@ -742,11 +1293,37 @@ async function findTouristRoute() {
     </div>
   `;
 
-  // Find comprehensive places along the route
-  const { grouped, flat } = await findAllTouristPlacesAlongRoute(mainRoute.geometry, 1500);
+  // Find comprehensive places along the route from OSM
+  const { grouped: osmGrouped, flat: osmFlat } = await findAllTouristPlacesAlongRoute(mainRoute.geometry, 1500);
+
+  // Fetch supplemental POIs from TomTom and merge
+  let mergedGrouped = {};
+  let mergedFlat = [];
+  try {
+    const tom = await fetchTomTomPOIs(mainRoute.geometry, vehicleType, osmGrouped);
+    lastTouristDataEnhanced = !!tom.enhanced;
+    // initialize merged with OSM
+    for (const key of Object.keys(TOURIST_CATEGORIES)) {
+      mergedGrouped[key] = Array.isArray(osmGrouped[key]) ? [...osmGrouped[key]] : [];
+    }
+    // merge TomTom
+    for (const key of Object.keys(TOURIST_CATEGORIES)) {
+      const list = tom.grouped && Array.isArray(tom.grouped[key]) ? tom.grouped[key] : [];
+      if (list.length) {
+        mergedGrouped[key].push(...list);
+        // dedupe and cap
+        mergedGrouped[key] = dedupeByLocation(mergedGrouped[key]).slice(0, 15);
+      }
+    }
+    mergedFlat = Object.values(mergedGrouped).flat();
+  } catch (_) {
+    lastTouristDataEnhanced = false;
+    mergedGrouped = osmGrouped;
+    mergedFlat = osmFlat || [];
+  }
 
   // Display markers
-  displayTouristAttractions(grouped);
+  displayTouristAttractions(mergedGrouped);
 
   // Save summary to backend (optional, keeps existing save behavior consistent)
   try {
@@ -759,13 +1336,14 @@ async function findTouristRoute() {
       vehicleType,
       vehicleYear,
         distance: parseFloat(distanceKm),
-        emissions: parseFloat(emissions)
+        emissions: parseFloat(emissions),
+        routeSource: lastTouristDataEnhanced ? 'TomTom+OSM' : 'OSM'
       })
     }).catch(() => {});
   } catch (_) {}
 
   // Info panel
-  if (!flat || flat.length === 0) {
+  if (!mergedFlat || mergedFlat.length === 0) {
     document.getElementById("info-box").innerHTML = `
       <div class="info-header">
         <span>Tourist Attractions</span>
@@ -784,12 +1362,15 @@ async function findTouristRoute() {
       </div>
     `;
   } else {
+    // Append traffic/weather snippet if available
+    const addon = lastTrafficWeatherHtml || '';
     displayTouristRouteInfo({
       distanceKm,
       emissions,
       vehicleType,
       vehicleYear,
-      grouped
+      grouped: mergedGrouped,
+      extraHtml: addon
     });
   }
 
@@ -802,32 +1383,20 @@ function displayTouristAttractions(grouped) {
   Object.keys(grouped).forEach(key => {
     const cat = TOURIST_CATEGORIES[key];
     const places = grouped[key] || [];
-    places.forEach(p => {
+    places.forEach(async p => {
       const marker = L.marker([p.lat, p.lon], { icon: buildTouristDivIcon(key) }).addTo(map);
+      markerByPlaceId.set(p.id || `${p.lat},${p.lon}`, marker);
       const name = p.name || 'Unnamed';
       const details = [];
       if (p.tags.addr_full) details.push(p.tags.addr_full);
       if (p.tags.opening_hours) details.push(`Hours: ${p.tags.opening_hours}`);
       if (p.tags.phone) details.push(`☎ ${p.tags.phone}`);
       if (p.tags.website) details.push(`<a href="${p.tags.website}" target="_blank">Website</a>`);
-      const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}`;
       const osmUrl = `https://www.openstreetmap.org/${p.id}`;
-      const popupHtml = `
-        <div class="tourist-popup">
-          <div class="popup-head" style="border-bottom-color:${cat ? cat.color : '#2e7d32'};">
-            <span class="emoji">${cat ? cat.emoji : '📍'}</span>
-            <strong>${name}</strong>
-          </div>
-          <div class="popup-body">
-            <div class="popup-cat" style="background:${cat ? cat.color : '#2e7d32'}22; color:${cat ? cat.color : '#2e7d32'}">${cat ? cat.label : 'Place'}</div>
-            ${details.length ? `<div class="popup-details">${details.join('<br>')}</div>` : ''}
-          </div>
-          <div class="popup-actions">
-            <a class="dir-btn" href="${mapsUrl}" target="_blank">Get Directions</a>
-            <a class="osm-link" href="${osmUrl}" target="_blank">OSM</a>
-          </div>
-        </div>
-      `;
+      // Try fetch an image
+      let imgUrl = null;
+      try { imgUrl = await fetchPlaceImage(p); } catch(_) {}
+      const popupHtml = buildPlacePopupHtml(cat, name, details, osmUrl, p.lat, p.lon, imgUrl);
       marker.bindPopup(popupHtml, { maxWidth: 280 });
       routeLayers.push(marker);
     });
@@ -835,12 +1404,14 @@ function displayTouristAttractions(grouped) {
 }
 
 // Render the info panel with categorized counts and lists
-function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYear, grouped }) {
+function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYear, grouped, extraHtml }) {
   let html = `
     <div class="tourist-info-panel">
       <div class="summary">
         <div><strong>Distance:</strong> ${distanceKm} km</div>
         <div><strong>${vehicleType.toUpperCase()} (${vehicleYear}) CO₂:</strong> ${emissions} g</div>
+        ${lastTouristDataEnhanced ? '<div><small>Enhanced with TomTom data</small></div>' : '<div><small>Data from OSM</small></div>'}
+        ${extraHtml ? `<div>${extraHtml}</div>` : ''}
     </div>
       <div class="categories">
   `;
@@ -854,7 +1425,7 @@ function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYe
       <div class="cat-section">
         <div class="cat-header"><span class="chip" style="background:${cat.color}22; color:${cat.color}">${cat.emoji}</span>${cat.label} <span class="count">${count}</span></div>
         <ul class="cat-list">
-          ${items.map(p => `<li title="${p.name}">${p.name}</li>`).join('')}
+          ${items.map(p => `<li title="${p.name}" data-place-id="${p.id}">${p.name}</li>`).join('')}
         </ul>
       </div>
     `;
@@ -872,6 +1443,22 @@ function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYe
     <div class="info-body">${html}</div>
   `;
   autoCollapseInfoBoxOnSmallScreens();
+
+  // Attach click handlers for list items to pan/zoom and open popup
+  try {
+    const list = box.querySelectorAll('.cat-list li[data-place-id]');
+    list.forEach(li => {
+      li.addEventListener('click', () => {
+        const pid = li.getAttribute('data-place-id');
+        const marker = markerByPlaceId.get(pid);
+        if (marker && map) {
+          const latlng = marker.getLatLng();
+          map.setView(latlng, Math.max(map.getZoom(), 16));
+          try { marker.openPopup(); } catch(_) {}
+        }
+      });
+    });
+  } catch (_) {}
 }
 
 // Collapse info box by default on small screens for better map visibility
@@ -1020,6 +1607,17 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 }
 
 
+
+// Focus map on a place when user clicks the popup button
+function focusPlace(lat, lon) {
+  try {
+    if (!map) return;
+    map.setView([lat, lon], Math.max(map.getZoom(), 16));
+    const temp = L.circleMarker([lat, lon], { radius: 8, color: '#10b981', fillColor: '#10b981', fillOpacity: 0.9 });
+    temp.addTo(map);
+    setTimeout(() => { try { map.removeLayer(temp); } catch(_) {} }, 2000);
+  } catch (_) {}
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   const hamburger = document.getElementById("hamburger");

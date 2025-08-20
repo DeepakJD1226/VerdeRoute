@@ -84,6 +84,17 @@
           <li>Plan routes to avoid congestion hotspots</li>
         </ul>
       </article>
+      <article class="card tourist-card">
+        <h3>🌿 New: Tourist Green Routes</h3>
+        <p>Discover scenic routes that pass through parks, forests, lakes, and other natural attractions. Perfect for eco-tourism and nature lovers!</p>
+        <ul class="tick-list">
+          <li>Find green places along your route</li>
+          <li>Explore nature while traveling</li>
+          <li>Reduce stress with scenic views</li>
+          <li>Support eco-tourism initiatives</li>
+        </ul>
+        <button onclick="showMap()" class="tourist-feature-btn">Try Tourist Route</button>
+      </article>
     </section>
 
     <!-- Recent routes & theme toggle -->
@@ -111,7 +122,7 @@
           </tbody>
         </table>
       </div>
-      <p class="hint">Tip: Press <kbd>H</kbd> to open Home menu, <kbd>M</kbd> for Map, and <kbd>/</kbd> to focus the Source field.</p>
+      <p class="hint">Tip: Press <kbd>H</kbd> to open Home menu, <kbd>M</kbd> for Map, <kbd>T</kbd> for Tourist Route, and <kbd>/</kbd> to focus the Source field.</p>
     </section>
 
     <div id="step1" class="step-content">
@@ -142,6 +153,7 @@
       </div>
       <div class="form-group">
         <input type="text" id="source" placeholder="Enter Source" />
+        <button type="button" class="inline-btn" onclick="useCurrentLocationForSource()">📍 Use My Location</button>
       </div>
       <div class="form-group">
         <input type="text" id="destination" placeholder="Enter Destination" />
@@ -165,6 +177,10 @@
 
       <div class="form-group">
         <button onclick="findRoute()">Find Route</button>
+      </div>
+      <div class="form-group">
+        <small style="color: #16a34a; font-weight: bold; display: block; margin-bottom: 5px;">🌿 Discover green places along your route!</small>
+        <button onclick="findTouristRoute()" class="tourist-btn">🌿 Find Tourist Route</button>
       </div>
       <div class="form-group">
         <button onclick="showHome()">⬅ Back to Home</button>
@@ -219,11 +235,23 @@
         });
       }
 
-      // Keyboard shortcuts
+      // Keyboard shortcuts (guard against undefined key)
       document.addEventListener('keydown', (e) => {
-        if (e.key.toLowerCase() === 'h') { document.getElementById('hamburger').click(); }
-        if (e.key.toLowerCase() === 'm') { showMap(); }
-        if (e.key === '/') {
+        const key = (e && typeof e.key === 'string') ? e.key.toLowerCase() : '';
+        if (!key) return;
+        if (key === 'h') { document.getElementById('hamburger').click(); }
+        if (key === 'm') { showMap(); }
+        if (key === 't') { 
+          showMap(); 
+          setTimeout(() => {
+            if (typeof findTouristRoute === 'function') {
+              // Focus on destination field for tourist route
+              const destEl = document.getElementById('destination');
+              if (destEl) destEl.focus();
+            }
+          }, 500);
+        }
+        if (key === '/') {
           const el = document.getElementById('source');
           if (el) { e.preventDefault(); el.focus(); }
         }
@@ -232,8 +260,7 @@
   </script>
   <footer id="footer">
     <div class="footer-content">
-      <p>🌿 GreenRoute &copy; 2025 — Drive Clean. Live Green.</p>
-      <p>Crafted with care for a sustainable future 🌍</p>
+      <p>VerdeRoute &copy; 2025 — Drive clean. Live green.</p>
     </div>
   </footer>
 </body>

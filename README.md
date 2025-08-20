@@ -13,6 +13,7 @@ GreenRoute estimates CO₂ emissions for a trip and suggests greener alternative
 ## Features
 - Map with Leaflet + OpenStreetMap tiles
 - Routing via Mapbox Directions API (main + alternate routes)
+- **🌿 Tourist Green Routes** - Find scenic routes through parks, forests, lakes, and nature reserves
 - Emission calculation by vehicle type, adjusted by vehicle year
 - Suggestions API for best mode (emissions + time)
 - Save routes to MongoDB and list recent routes
@@ -49,6 +50,7 @@ Change `3000` to `5000` to match the backend, or update `server.js` to listen on
 ## Keyboard Shortcuts
 - `H` — open Home menu
 - `M` — switch to Map view
+- `T` — switch to Map view and prepare for Tourist Route
 - `/` — focus the Source input
 
 ## API Reference
@@ -70,7 +72,9 @@ Change `3000` to `5000` to match the backend, or update `server.js` to listen on
   vehicleYear: Number,
   distance: Number,
   emissions: Number,
-  date: Date
+  date: Date,
+  ecoTip: String,        // Environmental tips and route type info
+  routeType: String      // "tourist_green" for tourist routes
 }
 ```
 
@@ -78,6 +82,28 @@ Change `3000` to `5000` to match the backend, or update `server.js` to listen on
 - Base emission rates (g/km) for these types: `petrol`, `diesel`, `electric`, `bike`, `bus`, `truck`, `electric_truck`, `walking`, `cycling`
 - Time estimate = distance / averageSpeed (km/h)
 - Vehicle year adjustment: older vehicles emit more (+1.5% per year older)
+
+## 🌿 Tourist Green Routes Feature
+The tourist route feature automatically discovers green and nature places along your planned route:
+
+### What It Finds
+- **Parks & Gardens**: Public parks, botanical gardens, green spaces
+- **Natural Areas**: Forests, nature reserves, wildlife sanctuaries
+- **Water Bodies**: Lakes, rivers, beaches
+- **Trails & Mountains**: Hiking trails, mountain viewpoints
+
+### How It Works
+1. **Route Planning**: Enter your source and destination
+2. **Green Discovery**: The system searches for nature places within 2km of your route
+3. **Interactive Map**: Green places are marked with 🌿 icons on the map
+4. **Detailed Info**: Click markers to see place names and descriptions
+5. **Eco-Friendly**: Routes are optimized to showcase natural attractions
+
+### Perfect For
+- **Eco-tourism**: Discover scenic routes through nature
+- **Stress Relief**: Enjoy green views during travel
+- **Family Trips**: Find kid-friendly nature stops
+- **Photography**: Capture beautiful natural landscapes
 
 ## Example Requests
 ```bash
@@ -108,6 +134,7 @@ curl http://localhost:5000/recent-routes?limit=5
 ## Notes on Third‑party Services
 - Geocoding via Nominatim (respect usage policy and rate limits)
 - Routing via Mapbox Directions (requires a valid access token)
+- **Tourist Route Search**: Uses OpenStreetMap Nominatim API to find green places along routes
 
 ## License
 ISC (see `package.json`).

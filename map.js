@@ -28,6 +28,350 @@ const averageSpeeds = {
   cycling: 15
 };
 
+// Fetch with timeout helper to avoid long hangs
+async function fetchWithTimeout(resource, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(resource, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// Tourist categories configuration
+const TOURIST_CATEGORIES = {
+  parks: { key: 'parks', label: 'Parks', emoji: '🌳', color: '#4CAF50' },
+  gardens: { key: 'gardens', label: 'Gardens', emoji: '🌺', color: '#8BC34A' },
+  beaches: { key: 'beaches', label: 'Beaches', emoji: '🏖️', color: '#FFB74D' },
+  rivers: { key: 'rivers', label: 'Rivers', emoji: '🌊', color: '#2196F3' },
+  lakes: { key: 'lakes', label: 'Lakes', emoji: '🏞️', color: '#03DAC6' },
+  forests: { key: 'forests', label: 'Forests', emoji: '🌲', color: '#2E7D32' },
+  monuments: { key: 'monuments', label: 'Monuments', emoji: '🏛️', color: '#FF9800' },
+  temples: { key: 'temples', label: 'Temples', emoji: '🕌', color: '#9C27B0' },
+  museums: { key: 'museums', label: 'Museums', emoji: '🏛️', color: '#FF5722' },
+  palaces: { key: 'palaces', label: 'Palaces', emoji: '🏰', color: '#E91E63' },
+  forts: { key: 'forts', label: 'Forts', emoji: '🏯', color: '#795548' },
+  ev: { key: 'ev', label: 'EV Charging', emoji: '⚡', color: '#9C27B0' },
+  fuel: { key: 'fuel', label: 'Petrol Pumps', emoji: '⛽', color: '#F44336' },
+  hospitals: { key: 'hospitals', label: 'Hospitals', emoji: '🏥', color: '#F44336' },
+  atms: { key: 'atms', label: 'ATMs', emoji: '💳', color: '#9E9E9E' },
+  toilets: { key: 'toilets', label: 'Toilets', emoji: '🚻', color: '#9E9E9E' },
+  restaurants: { key: 'restaurants', label: 'Restaurants', emoji: '🍽️', color: '#F44336' },
+  cafes: { key: 'cafes', label: 'Cafes', emoji: '☕', color: '#8D6E63' },
+  hotels: { key: 'hotels', label: 'Hotels', emoji: '🏨', color: '#795548' },
+  cinemas: { key: 'cinemas', label: 'Cinemas', emoji: '🎬', color: '#E91E63' },
+  malls: { key: 'malls', label: 'Shopping Malls', emoji: '🛍️', color: '#E91E63' },
+  markets: { key: 'markets', label: 'Markets', emoji: '🏪', color: '#FF9800' }
+};
+
+// Helper: build a category-specific Leaflet DivIcon
+function buildTouristDivIcon(categoryKey) {
+  const cat = TOURIST_CATEGORIES[categoryKey] || { emoji: '📍', color: '#2e7d32' };
+  return L.divIcon({
+    className: 'tourist-marker',
+    html: `<div class="tourist-marker-circle" style="border-color:${cat.color}; background:${cat.color}22;">
+      <span class="tourist-marker-emoji">${cat.emoji}</span>
+    </div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15]
+  });
+}
+
+// Helper: compute bbox with small buffer from route geometry
+function computeBufferedBbox(routeGeometry, bufferDeg = 0.05) {
+  const coords = routeGeometry.coordinates;
+  let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+  coords.forEach(([lon, lat]) => {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+  });
+  return {
+    south: minLat - bufferDeg,
+    west: minLon - bufferDeg,
+    north: maxLat + bufferDeg,
+    east: maxLon + bufferDeg
+  };
+}
+
+// Helper: convert lat/lon to Web Mercator meters for distance calcs
+function latLonToMeters(lat, lon) {
+  const x = lon * 20037508.34 / 180.0;
+  let y = Math.log(Math.tan((90 + lat) * Math.PI / 360.0)) / (Math.PI / 180.0);
+  y = y * 20037508.34 / 180.0;
+  return { x, y };
+}
+
+// Helper: distance from a point (lat,lon) to a polyline (list of [lon,lat]) in meters
+function distancePointToPolylineMeters(pointLat, pointLon, lineCoordinates) {
+  const p = latLonToMeters(pointLat, pointLon);
+  let minDist = Infinity;
+  for (let i = 1; i < lineCoordinates.length; i++) {
+    const [lon1, lat1] = lineCoordinates[i - 1];
+    const [lon2, lat2] = lineCoordinates[i];
+    const a = latLonToMeters(lat1, lon1);
+    const b = latLonToMeters(lat2, lon2);
+    const abx = b.x - a.x; const aby = b.y - a.y;
+    const apx = p.x - a.x; const apy = p.y - a.y;
+    const ab2 = abx * abx + aby * aby;
+    let t = ab2 === 0 ? 0 : ((apx * abx + apy * aby) / ab2);
+    t = Math.max(0, Math.min(1, t));
+    const projx = a.x + t * abx;
+    const projy = a.y + t * aby;
+    const dx = p.x - projx; const dy = p.y - projy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < minDist) minDist = dist;
+  }
+  return minDist;
+}
+
+// Helper: deduplicate by approximate location
+function dedupeByLocation(places) {
+  const seen = new Set();
+  const result = [];
+  for (const place of places) {
+    if (!place.lat || !place.lon) continue;
+    const key = `${place.lat.toFixed(5)}_${place.lon.toFixed(5)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(place);
+  }
+  return result;
+}
+
+// Helper: get a safe name from tags
+function getPlaceName(tags) {
+  return tags.name || tags['name:en'] || tags['alt_name'] || tags['brand'] || 'Unnamed';
+}
+
+// Categorize an OSM element into one of our categories
+function determineCategory(tags) {
+  const leisure = tags.leisure;
+  const natural = tags.natural;
+  const tourism = tags.tourism;
+  const amenity = tags.amenity;
+  const historic = tags.historic;
+  const water = tags.water;
+  const waterway = tags.waterway;
+  const landuse = tags.landuse;
+  const religion = tags.religion;
+  const shop = tags.shop;
+
+  if (amenity === 'charging_station') return 'ev';
+  if (amenity === 'fuel') return 'fuel';
+  if (amenity === 'hospital') return 'hospitals';
+  if (amenity === 'atm') return 'atms';
+  if (amenity === 'toilets') return 'toilets';
+  if (amenity === 'restaurant') return 'restaurants';
+  if (amenity === 'cafe') return 'cafes';
+  if (amenity === 'cinema') return 'cinemas';
+  if (amenity === 'marketplace') return 'markets';
+
+  if (tourism === 'hotel') return 'hotels';
+  if (tourism === 'museum') return 'museums';
+  if (tourism === 'monument' || tourism === 'attraction') return 'monuments';
+
+  if (historic === 'palace') return 'palaces';
+  if (historic === 'fort' || historic === 'castle') return 'forts';
+  if (historic === 'monument') return 'monuments';
+
+  if (leisure === 'park' || landuse === 'recreation_ground') return 'parks';
+  if (leisure === 'garden') return 'gardens';
+  if (leisure === 'nature_reserve') return 'parks';
+
+  if (natural === 'beach') return 'beaches';
+  if (natural === 'water' && (water === 'lake' || water === 'lagoon' || water === 'reservoir' || water === 'pond')) return 'lakes';
+  if (natural === 'wood' || landuse === 'forest' || natural === 'forest') return 'forests';
+  if (waterway === 'river' || (natural === 'water' && water === 'river')) return 'rivers';
+
+  if (amenity === 'place_of_worship' || tourism === 'place_of_worship' || religion) return 'temples';
+
+  if (shop === 'mall') return 'malls';
+  if (shop === 'supermarket' || shop === 'convenience') return 'markets';
+
+  return null;
+}
+
+// Build a comprehensive Overpass QL query within bbox
+function buildOverpassQuery(bbox) {
+  const { south, west, north, east } = bbox;
+  return `
+    [out:json][timeout:15];
+    (
+      node["leisure"~"park|garden|nature_reserve"](${south},${west},${north},${east});
+      way["leisure"~"park|garden|nature_reserve"](${south},${west},${north},${east});
+      relation["leisure"~"park|garden|nature_reserve"](${south},${west},${north},${east});
+
+      node["natural"~"beach|water"](${south},${west},${north},${east});
+      way["natural"~"beach|water"](${south},${west},${north},${east});
+      relation["natural"~"beach|water"](${south},${west},${north},${east});
+
+      node["waterway"="river"](${south},${west},${north},${east});
+      way["waterway"="river"](${south},${west},${north},${east});
+      relation["waterway"="river"](${south},${west},${north},${east});
+
+      node["tourism"~"monument|museum|attraction|hotel"](${south},${west},${north},${east});
+      way["tourism"~"monument|museum|attraction|hotel"](${south},${west},${north},${east});
+      relation["tourism"~"monument|museum|attraction|hotel"](${south},${west},${north},${east});
+
+      node["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace"](${south},${west},${north},${east});
+      way["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace"](${south},${west},${north},${east});
+      relation["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace"](${south},${west},${north},${east});
+
+      node["historic"~"palace|castle|fort|monument"](${south},${west},${north},${east});
+      way["historic"~"palace|castle|fort|monument"](${south},${west},${north},${east});
+      relation["historic"~"palace|castle|fort|monument"](${south},${west},${north},${east});
+
+      node["natural"~"wood|forest"](${south},${west},${north},${east});
+      way["natural"~"wood|forest"](${south},${west},${north},${east});
+      relation["natural"~"wood|forest"](${south},${west},${north},${east});
+
+      node["shop"~"mall|supermarket"](${south},${west},${north},${east});
+      way["shop"~"mall|supermarket"](${south},${west},${north},${east});
+      relation["shop"~"mall|supermarket"](${south},${west},${north},${east});
+    );
+    out center 120;
+  `;
+}
+
+// Call Overpass API and return normalized elements
+async function searchComprehensivePlaces(routeGeometry) {
+  try {
+    const bbox = computeBufferedBbox(routeGeometry, 0.03);
+    const query = buildOverpassQuery(bbox);
+    let data;
+    try {
+      const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams({ data: query })
+      }, 20000);
+      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+      data = await res.json();
+    } catch (e1) {
+      console.warn('Primary Overpass failed, trying mirror...');
+      const res2 = await fetchWithTimeout('https://overpass.kumi.systems/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams({ data: query })
+      }, 20000);
+      if (!res2.ok) throw new Error(`Overpass Mirror HTTP ${res2.status}`);
+      data = await res2.json();
+    }
+    if (!data.elements) return [];
+    const elements = data.elements
+      .map(el => {
+        const lat = el.lat || (el.center && el.center.lat);
+        const lon = el.lon || (el.center && el.center.lon);
+        const tags = el.tags || {};
+        if (lat == null || lon == null) return null;
+        return { id: `${el.type}/${el.id}`, lat, lon, tags, name: getPlaceName(tags) };
+      })
+      .filter(Boolean);
+    return elements;
+  } catch (e) {
+    console.error('Overpass error:', e);
+    return [];
+  }
+}
+
+// Fallback: segment the route and query smaller windows to capture near-route POIs
+async function searchComprehensivePlacesSegmented(routeGeometry) {
+  const coords = routeGeometry.coordinates; // [lon,lat]
+  if (!coords || coords.length === 0) return [];
+
+  // Sample up to 12 evenly spaced points along the route
+  const maxSamples = 12;
+  const step = Math.max(1, Math.floor(coords.length / maxSamples));
+  const samples = [];
+  for (let i = 0; i < coords.length; i += step) samples.push(coords[i]);
+  if (samples[samples.length - 1] !== coords[coords.length - 1]) samples.push(coords[coords.length - 1]);
+
+  const aggregate = [];
+  for (let i = 0; i < samples.length; i++) {
+    const [lon, lat] = samples[i];
+    // Small bbox around sample point
+    const bbox = { south: lat - 0.02, west: lon - 0.02, north: lat + 0.02, east: lon + 0.02 };
+    const query = buildOverpassQuery(bbox);
+    try {
+      const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+        body: new URLSearchParams({ data: query })
+      }, 15000);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.elements)) {
+          for (const el of data.elements) {
+            const latEl = el.lat || (el.center && el.center.lat);
+            const lonEl = el.lon || (el.center && el.center.lon);
+            const tags = el.tags || {};
+            if (latEl == null || lonEl == null) continue;
+            aggregate.push({ id: `${el.type}/${el.id}`, lat: latEl, lon: lonEl, tags, name: getPlaceName(tags) });
+          }
+        }
+      }
+    } catch (e) {
+      // try mirror quickly for this segment
+      try {
+        const res2 = await fetchWithTimeout('https://overpass.kumi.systems/api/interpreter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: new URLSearchParams({ data: query })
+        }, 15000);
+        if (res2.ok) {
+          const data2 = await res2.json();
+          if (data2 && Array.isArray(data2.elements)) {
+            for (const el of data2.elements) {
+              const latEl = el.lat || (el.center && el.center.lat);
+              const lonEl = el.lon || (el.center && el.center.lon);
+              const tags = el.tags || {};
+              if (latEl == null || lonEl == null) continue;
+              aggregate.push({ id: `${el.type}/${el.id}`, lat: latEl, lon: lonEl, tags, name: getPlaceName(tags) });
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    // Soft cap to avoid overload
+    if (aggregate.length > 600) break;
+  }
+  return aggregate;
+}
+
+// Filter all places to those along the route and categorize
+async function findAllTouristPlacesAlongRoute(routeGeometry, corridorMeters = 1000) {
+  let allPlaces = await searchComprehensivePlaces(routeGeometry);
+  if (!allPlaces.length) {
+    // Fallback to segmented strategy when bbox query returns empty or is rate-limited
+    allPlaces = await searchComprehensivePlacesSegmented(routeGeometry);
+  }
+  if (!allPlaces.length) return { grouped: {}, flat: [] };
+  const withinCorridor = allPlaces.filter(p => {
+    const d = distancePointToPolylineMeters(p.lat, p.lon, routeGeometry.coordinates);
+    return d <= corridorMeters;
+  });
+  const deduped = dedupeByLocation(withinCorridor);
+  const categorized = deduped.map(p => {
+    const cat = determineCategory(p.tags);
+    return { ...p, category: cat };
+  }).filter(p => !!p.category);
+
+  // Group and limit per category
+  const grouped = {};
+  for (const key of Object.keys(TOURIST_CATEGORIES)) grouped[key] = [];
+  for (const p of categorized) {
+    const key = p.category;
+    if (!grouped[key]) grouped[key] = [];
+    if (grouped[key].length < 15) grouped[key].push(p);
+  }
+  const flat = Object.values(grouped).flat();
+  return { grouped, flat };
+}
+
 function toggleSidebar() {
   document.getElementById("sidebar").classList.toggle("open");
 }
@@ -41,6 +385,9 @@ function showHome() {
   document.getElementById('mapContainer').style.display = 'none';
   document.getElementById("homeSidebar").classList.remove("hidden");
   document.getElementById("sidebar").classList.remove("open");
+  document.getElementById("hamburger").classList.add("hidden");
+  document.getElementById("mapContainer").classList.remove("sidebar-open");
+  document.getElementById('sidebarOverlay').classList.add('show');
 }
 
 function showMap() {
@@ -48,6 +395,9 @@ function showMap() {
   document.getElementById('mapContainer').style.display = 'block';
   document.getElementById("sidebar").classList.add("open");
   document.getElementById("homeSidebar").classList.add("hidden");
+  document.getElementById("hamburger").classList.add("hidden");
+  document.getElementById("mapContainer").classList.add("sidebar-open");
+  document.getElementById('sidebarOverlay').classList.add('show');
 
   setTimeout(() => {
     if (!map) {
@@ -78,19 +428,56 @@ function showMap() {
 }
 
 async function geocode(location) {
-  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(location)}`;
-  const res = await fetch(url);
+  const trimmed = (location || '').trim();
+  if (!trimmed) return null;
+  // Try Mapbox → Nominatim → Photon
+  // Add proximity/country bias to improve Indian city results
+  const center = map && typeof map.getCenter === 'function' ? map.getCenter() : null;
+  const proximity = center ? `&proximity=${center.lng},${center.lat}` : '';
+  const mapboxToken = 'pk.eyJ1IjoiamQxMjA2IiwiYSI6ImNtZGJxZGE0MzBuZXgycXIyaHZlNHhjMjkifQ.fhXRKJLNhYo5xB992ZIbVg';
+  try {
+    const mbUrl = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(trimmed)}.json?limit=1&language=en&country=in${proximity}&access_token=${mapboxToken}`;
+    const mbRes = await fetchWithTimeout(mbUrl, {}, 9000);
+    if (mbRes.ok) {
+      const mb = await mbRes.json();
+      if (mb && mb.features && mb.features.length > 0) {
+        const [lon, lat] = mb.features[0].geometry.coordinates;
+        if (isFinite(lat) && isFinite(lon)) return [lat, lon];
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(trimmed)}&limit=1&countrycodes=in`;
+    const res = await fetchWithTimeout(nomUrl, { headers: { 'Accept': 'application/json' } }, 12000);
+    if (res.ok) {
   const data = await res.json();
-  return data.length > 0 ? [parseFloat(data[0].lat), parseFloat(data[0].lon)] : null;
+      if (Array.isArray(data) && data.length > 0) return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+    }
+  } catch (_) {}
+
+  try {
+    const phUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(trimmed)}&limit=1`;
+    const phRes = await fetchWithTimeout(phUrl, {}, 9000);
+    if (phRes.ok) {
+      const ph = await phRes.json();
+      if (ph && ph.features && ph.features.length > 0) {
+        const coords = ph.features[0].geometry.coordinates; // [lon,lat]
+        if (coords && coords.length === 2) return [coords[1], coords[0]];
+      }
+    }
+  } catch (_) {}
+
+  return null;
 }
 
 async function getVehicleSuggestion(distance) {
   try {
-    const res = await fetch("http://localhost:3000/suggest", {
+    const res = await fetchWithTimeout("http://localhost:5000/suggest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ distanceKm: parseFloat(distance) })
-    });
+    }, 6000);
     return await res.json();
   } catch (err) {
     console.error("Suggestion fetch error:", err);
@@ -154,7 +541,7 @@ async function findRoute() {
   map.fitBounds([sourceCoords, destCoords], { padding: [50, 50] });
 
   const routeURL = `https://api.mapbox.com/directions/v5/mapbox/driving-traffic/${sourceCoords[1]},${sourceCoords[0]};${destCoords[1]},${destCoords[0]}?geometries=geojson&overview=full&alternatives=true&access_token=pk.eyJ1IjoiamQxMjA2IiwiYSI6ImNtZGJxZGE0MzBuZXgycXIyaHZlNHhjMjkifQ.fhXRKJLNhYo5xB992ZIbVg`;
-  const res = await fetch(routeURL);
+  const res = await fetchWithTimeout(routeURL, {}, 15000);
   let data = await res.json();
 
   // Fallback: if Mapbox gives only 1 route, force an alternate
@@ -162,7 +549,7 @@ async function findRoute() {
     console.warn("Only one route found — forcing alternate calculation...");
     const nudgedDest = [destCoords[0] + 0.002, destCoords[1] + 0.002]; // ~200m offset
     const altURL = `https://api.mapbox.com/directions/v5/mapbox/driving-traffic/${sourceCoords[1]},${sourceCoords[0]};${nudgedDest[1]},${nudgedDest[0]}?geometries=geojson&overview=full&access_token=pk.eyJ1IjoiamQxMjA2IiwiYSI6ImNtZGJxZGE0MzBuZXgycXIyaHZlNHhjMjkifQ.fhXRKJLNhYo5xB992ZIbVg`;
-    const altRes = await fetch(altURL);
+    const altRes = await fetchWithTimeout(altURL, {}, 15000);
     const altData = await altRes.json();
     if (altData.routes && altData.routes.length > 0) {
       data.routes.push(altData.routes[0]);
@@ -253,7 +640,16 @@ async function findRoute() {
   // Add eco tip to info box
   infoHTML += `<br><strong style="color:green;">Eco Tip:</strong> ${ecoTip}`;
 
-  document.getElementById("info-box").innerHTML = infoHTML;
+  const box = document.getElementById("info-box");
+  box.innerHTML = `
+    <div class="info-header">
+      <span>Route Summary</span>
+      <div class="info-actions">
+        <button class="min-btn" onclick="document.getElementById('info-box').classList.toggle('collapsed')">—</button>
+      </div>
+    </div>
+    <div class="info-body">${infoHTML}</div>
+  `;
 
   // try to refresh recent list on home screen if present
   try {
@@ -261,6 +657,366 @@ async function findRoute() {
       loadRecent();
     }
   } catch (_) {}
+}
+
+// Enhanced tourist route function: comprehensive attractions along the route
+async function findTouristRoute() {
+  const sourceText = document.getElementById("source").value.trim();
+  const destText = document.getElementById("destination").value.trim();
+  const vehicleType = document.getElementById("vehicleType").value;
+  const vehicleYear = parseInt(document.getElementById("vehicleYear").value);
+
+  if (!sourceText || !destText) {
+    document.getElementById("info-box").innerText = "---";
+    alert("Please enter both source and destination.");
+    return;
+  }
+
+  if (!vehicleYear || vehicleYear < 1980 || vehicleYear > new Date().getFullYear()) {
+    alert("Please enter a valid vehicle make year.");
+    return;
+  }
+
+  const sourceCoords = await geocode(sourceText);
+  const destCoords = await geocode(destText);
+
+  if (!sourceCoords || !destCoords) {
+    alert("Could not locate one or both addresses.");
+    return;
+  }
+
+  document.getElementById("sidebar").classList.remove("open");
+  document.getElementById("homeSidebar").classList.add("hidden");
+
+  // Clear previous layers
+  if (sourceMarker) map.removeLayer(sourceMarker);
+  if (destMarker) map.removeLayer(destMarker);
+  routeLayers.forEach(layer => map.removeLayer(layer));
+  routeLayers = [];
+
+  sourceMarker = L.marker(sourceCoords).addTo(map).bindPopup("Source");
+  destMarker = L.marker(destCoords).addTo(map).bindPopup("Destination");
+  map.fitBounds([sourceCoords, destCoords], { padding: [50, 50] });
+
+  // Get the route first
+  const routeURL = `https://api.mapbox.com/directions/v5/mapbox/driving-traffic/${sourceCoords[1]},${sourceCoords[0]};${destCoords[1]},${destCoords[0]}?geometries=geojson&overview=full&alternatives=false&access_token=pk.eyJ1IjoiamQxMjA2IiwiYSI6ImNtZGJxZGE0MzBuZXgycXIyaHZlNHhjMjkifQ.fhXRKJLNhYo5xB992ZIbVg`;
+  let data;
+  try {
+    const res = await fetchWithTimeout(routeURL, {}, 15000);
+    data = await res.json();
+  } catch (e) {
+    alert('Failed to fetch route. Please try again.');
+    console.error(e);
+    return;
+  }
+
+  if (!data.routes || data.routes.length === 0) {
+    alert("Could not find a route between these locations.");
+    return;
+  }
+
+  const mainRoute = data.routes[0];
+  const distanceKm = (mainRoute.distance / 1000).toFixed(2);
+  const adjustedRate = adjustEmissionRate(emissionRates[vehicleType], vehicleYear);
+  const emissions = (distanceKm * adjustedRate).toFixed(2);
+
+  // Draw the main route
+  const mainRouteLayer = L.geoJSON(mainRoute.geometry, {
+    style: { color: "#16a34a", weight: 6, opacity: 0.85 }
+  }).addTo(map);
+  routeLayers.push(mainRouteLayer);
+
+  // Loading state
+  document.getElementById("info-box").innerHTML = `
+    <div class="info-header">
+      <span>Tourist Attractions</span>
+      <div class="info-actions">
+        <button class="min-btn" onclick="document.getElementById('info-box').classList.toggle('collapsed')">—</button>
+      </div>
+    </div>
+    <div class="info-body">
+      <div class="tourist-loading">
+        <div class="spinner"></div>
+        <div><strong>Searching attractions along your route...</strong><br><small>This may take a few seconds</small></div>
+      </div>
+    </div>
+  `;
+
+  // Find comprehensive places along the route
+  const { grouped, flat } = await findAllTouristPlacesAlongRoute(mainRoute.geometry, 1500);
+
+  // Display markers
+  displayTouristAttractions(grouped);
+
+  // Save summary to backend (optional, keeps existing save behavior consistent)
+  try {
+  fetch("http://localhost:5000/save-route", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: sourceText,
+      destination: destText,
+      vehicleType,
+      vehicleYear,
+        distance: parseFloat(distanceKm),
+        emissions: parseFloat(emissions)
+      })
+    }).catch(() => {});
+  } catch (_) {}
+
+  // Info panel
+  if (!flat || flat.length === 0) {
+    document.getElementById("info-box").innerHTML = `
+      <div class="info-header">
+        <span>Tourist Attractions</span>
+        <div class="info-actions">
+          <button class="min-btn" onclick="document.getElementById('info-box').classList.toggle('collapsed')">—</button>
+        </div>
+      </div>
+      <div class="info-body">
+        <div class="tourist-info-panel">
+          <div class="summary">
+            <div><strong>Distance:</strong> ${distanceKm} km</div>
+            <div><strong>${vehicleType.toUpperCase()} (${vehicleYear}) CO₂:</strong> ${emissions} g</div>
+          </div>
+          <div style="color:#e6fff4">No attractions found within ~1 km of this route currently. Overpass may be rate-limited; try again shortly.</div>
+        </div>
+      </div>
+    `;
+  } else {
+    displayTouristRouteInfo({
+      distanceKm,
+      emissions,
+      vehicleType,
+      vehicleYear,
+      grouped
+    });
+  }
+
+  // Best effort: refresh recent list
+  try { if (typeof loadRecent === 'function') loadRecent(); } catch (_) {}
+}
+
+// Place markers on the map with category-specific styling
+function displayTouristAttractions(grouped) {
+  Object.keys(grouped).forEach(key => {
+    const cat = TOURIST_CATEGORIES[key];
+    const places = grouped[key] || [];
+    places.forEach(p => {
+      const marker = L.marker([p.lat, p.lon], { icon: buildTouristDivIcon(key) }).addTo(map);
+      const name = p.name || 'Unnamed';
+      const details = [];
+      if (p.tags.addr_full) details.push(p.tags.addr_full);
+      if (p.tags.opening_hours) details.push(`Hours: ${p.tags.opening_hours}`);
+      if (p.tags.phone) details.push(`☎ ${p.tags.phone}`);
+      if (p.tags.website) details.push(`<a href="${p.tags.website}" target="_blank">Website</a>`);
+      const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}`;
+      const osmUrl = `https://www.openstreetmap.org/${p.id}`;
+      const popupHtml = `
+        <div class="tourist-popup">
+          <div class="popup-head" style="border-bottom-color:${cat ? cat.color : '#2e7d32'};">
+            <span class="emoji">${cat ? cat.emoji : '📍'}</span>
+            <strong>${name}</strong>
+          </div>
+          <div class="popup-body">
+            <div class="popup-cat" style="background:${cat ? cat.color : '#2e7d32'}22; color:${cat ? cat.color : '#2e7d32'}">${cat ? cat.label : 'Place'}</div>
+            ${details.length ? `<div class="popup-details">${details.join('<br>')}</div>` : ''}
+          </div>
+          <div class="popup-actions">
+            <a class="dir-btn" href="${mapsUrl}" target="_blank">Get Directions</a>
+            <a class="osm-link" href="${osmUrl}" target="_blank">OSM</a>
+          </div>
+        </div>
+      `;
+      marker.bindPopup(popupHtml, { maxWidth: 280 });
+      routeLayers.push(marker);
+    });
+  });
+}
+
+// Render the info panel with categorized counts and lists
+function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYear, grouped }) {
+  let html = `
+    <div class="tourist-info-panel">
+      <div class="summary">
+        <div><strong>Distance:</strong> ${distanceKm} km</div>
+        <div><strong>${vehicleType.toUpperCase()} (${vehicleYear}) CO₂:</strong> ${emissions} g</div>
+    </div>
+      <div class="categories">
+  `;
+
+  Object.keys(TOURIST_CATEGORIES).forEach(key => {
+    const cat = TOURIST_CATEGORIES[key];
+    const items = (grouped[key] || []).slice(0, 6);
+    const count = grouped[key] ? grouped[key].length : 0;
+    if (count === 0) return; // skip empty
+    html += `
+      <div class="cat-section">
+        <div class="cat-header"><span class="chip" style="background:${cat.color}22; color:${cat.color}">${cat.emoji}</span>${cat.label} <span class="count">${count}</span></div>
+        <ul class="cat-list">
+          ${items.map(p => `<li title="${p.name}">${p.name}</li>`).join('')}
+        </ul>
+      </div>
+    `;
+  });
+
+  html += `</div></div>`;
+  const box = document.getElementById('info-box');
+  box.innerHTML = `
+    <div class="info-header">
+      <span>Tourist Attractions</span>
+      <div class="info-actions">
+        <button class="min-btn" onclick="document.getElementById('info-box').classList.toggle('collapsed')">—</button>
+      </div>
+    </div>
+    <div class="info-body">${html}</div>
+  `;
+  autoCollapseInfoBoxOnSmallScreens();
+}
+
+// Collapse info box by default on small screens for better map visibility
+function autoCollapseInfoBoxOnSmallScreens() {
+  try {
+    const box = document.getElementById('info-box');
+    if (!box) return;
+    const isSmall = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+    if (isSmall) box.classList.add('collapsed');
+  } catch (_) {}
+}
+
+// Function to find green/nature places along a route
+async function findGreenPlacesAlongRoute(routeGeometry, sourceCoords, destCoords) {
+  const greenPlaces = [];
+  
+  try {
+    // Extract waypoints from the route geometry
+    const waypoints = routeGeometry.coordinates.map(coord => [coord[1], coord[0]]);
+    
+    // Search for green places near waypoints (every 5th point to avoid too many API calls)
+    for (let i = 0; i < waypoints.length; i += 5) {
+      const waypoint = waypoints[i];
+      
+      try {
+        // Search for parks, forests, nature reserves, etc.
+        const searchQueries = [
+          'park',
+          'forest', 
+          'nature reserve',
+          'botanical garden',
+          'wildlife sanctuary',
+          'green space',
+          'trail',
+          'lake',
+          'river',
+          'mountain',
+          'beach'
+        ];
+
+        for (const query of searchQueries) {
+          const places = await searchNearbyPlaces(waypoint[0], waypoint[1], query, 2000); // 2km radius
+          greenPlaces.push(...places);
+        }
+      } catch (error) {
+        console.log(`Error searching near waypoint ${i}:`, error);
+      }
+    }
+
+    // Remove duplicates and limit results
+    const uniquePlaces = removeDuplicatePlaces(greenPlaces);
+    return uniquePlaces.slice(0, 15); // Return max 15 places
+  } catch (error) {
+    console.error('Error in findGreenPlacesAlongRoute:', error);
+    return [];
+  }
+}
+
+// Function to search for places near a coordinate
+async function searchNearbyPlaces(lat, lng, query, radius) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&lat=${lat}&lon=${lng}&radius=${radius}&limit=5`;
+    const response = await fetch(url);
+    const data = await response.json();
+    
+    return data.map(place => ({
+      name: place.display_name.split(',')[0] || place.display_name,
+      lat: parseFloat(place.lat),
+      lng: parseFloat(place.lon),
+      type: getPlaceType(query),
+      description: getPlaceDescription(place.display_name, query)
+    }));
+  } catch (error) {
+    console.error('Error searching places:', error);
+    return [];
+  }
+}
+
+// Function to get place type based on search query
+function getPlaceType(query) {
+  const typeMap = {
+    'park': '🌳 Park',
+    'forest': '🌲 Forest',
+    'nature reserve': '🦅 Nature Reserve',
+    'botanical garden': '🌸 Botanical Garden',
+    'wildlife sanctuary': '🦌 Wildlife Sanctuary',
+    'green space': '🌿 Green Space',
+    'trail': '🥾 Trail',
+    'lake': '🏞️ Lake',
+    'river': '🌊 River',
+    'mountain': '⛰️ Mountain',
+    'beach': '🏖️ Beach'
+  };
+  return typeMap[query] || '🌿 Green Place';
+}
+
+// Function to get place description
+function getPlaceDescription(displayName, query) {
+  const parts = displayName.split(',');
+  if (parts.length >= 2) {
+    return parts.slice(1, 3).join(', ').trim();
+  }
+  return displayName;
+}
+
+// Function to remove duplicate places
+function removeDuplicatePlaces(places) {
+  const seen = new Set();
+  return places.filter(place => {
+    const key = `${place.lat.toFixed(4)}-${place.lng.toFixed(4)}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+// Function to calculate green route distance (including detours to green places)
+function calculateGreenRouteDistance(routeGeometry, greenPlaces) {
+  // For now, return the original route distance
+  // In a more advanced version, this could calculate actual detours
+  const coordinates = routeGeometry.coordinates;
+  let totalDistance = 0;
+  
+  for (let i = 1; i < coordinates.length; i++) {
+    const prev = coordinates[i-1];
+    const curr = coordinates[i];
+    const distance = calculateDistance(prev[1], prev[0], curr[1], curr[0]);
+    totalDistance += distance;
+  }
+  
+  return (totalDistance / 1000).toFixed(2); // Convert to km
+}
+
+// Function to calculate distance between two points (Haversine formula)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
 }
 
 
@@ -278,15 +1034,33 @@ document.addEventListener("DOMContentLoaded", () => {
     sidebar.classList.remove('open');
     homeSidebar.classList.add('hidden');
     overlay.classList.remove('show');
+    // Show hamburger icon only when no sidebars are visible
+    document.getElementById("hamburger").classList.remove("hidden");
+    // Remove sidebar-open class from map container
+    document.getElementById("mapContainer").classList.remove("sidebar-open");
   }));
 
   hamburger.addEventListener("click", () => {
     if (mapContainer.style.display === "block") {
       sidebar.classList.toggle("open");
       overlay.classList.toggle('show', sidebar.classList.contains('open'));
+      // Hide hamburger when map sidebar is open
+      if (sidebar.classList.contains('open')) {
+        hamburger.classList.add('hidden');
+        document.getElementById("mapContainer").classList.add("sidebar-open");
+      } else {
+        hamburger.classList.remove('hidden');
+        document.getElementById("mapContainer").classList.remove("sidebar-open");
+      }
     } else {
       homeSidebar.classList.toggle("hidden");
       overlay.classList.toggle('show', !homeSidebar.classList.contains('hidden'));
+      // Hide hamburger when home sidebar is open
+      if (!homeSidebar.classList.contains('hidden')) {
+        hamburger.classList.add('hidden');
+      } else {
+        hamburger.classList.remove('hidden');
+      }
     }
   });
 
@@ -295,5 +1069,41 @@ document.addEventListener("DOMContentLoaded", () => {
     sidebar.classList.remove('open');
     homeSidebar.classList.add('hidden');
     overlay.classList.remove('show');
+    // Show hamburger icon when sidebar is closed
+    document.getElementById("hamburger").classList.remove("hidden");
+    // Remove sidebar-open class from map container
+    document.getElementById("mapContainer").classList.remove("sidebar-open");
   });
 });
+
+// Fill source with current location using Nominatim reverse geocoding
+async function useCurrentLocationForSource() {
+  try {
+    if (!navigator.geolocation) {
+      alert('Geolocation not supported on this device.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      try {
+        const res = await fetchWithTimeout(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`, { headers: { 'Accept': 'application/json' } }, 10000);
+        const data = await res.json();
+        const disp = data && (data.display_name || (data.address && (data.address.city || data.address.town || data.address.village)));
+        document.getElementById('source').value = disp || `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+        // Center map and set a marker hint
+        if (map) {
+          map.setView([lat, lon], 13);
+          L.marker([lat, lon]).addTo(map).bindPopup('Your current location').openPopup();
+        }
+      } catch (_) {
+        document.getElementById('source').value = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+      }
+    }, (err) => {
+      console.error('geo error', err);
+      alert('Unable to access your location. Please allow location permission.');
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+  } catch (e) {
+    console.error(e);
+  }
+}

@@ -111,6 +111,90 @@ let lastTrafficWeatherHtml = '';
 const imageCache = new Map();
 const markerByPlaceId = new Map();
 
+// Global popup management
+let currentOpenPopup = null;
+let hoverTimeout = null;
+let lastHoveredMarker = null;
+
+// Function to close all open popups
+function closeAllPopups() {
+  if (currentOpenPopup) {
+    try {
+      currentOpenPopup.closePopup();
+    } catch (_) {}
+    currentOpenPopup = null;
+  }
+}
+
+// Function to close popup after delay (for hover interactions)
+function closePopupAfterDelay(popup, delay = 1500) {
+  if (hoverTimeout) {
+    clearTimeout(hoverTimeout);
+  }
+  hoverTimeout = setTimeout(() => {
+    if (popup && popup.isOpen() && popup !== currentOpenPopup) {
+      popup.closePopup();
+    }
+  }, delay);
+}
+
+// Function to handle popup open event
+function onPopupOpen(popup) {
+  closeAllPopups();
+  currentOpenPopup = popup;
+}
+
+// Function to handle popup close event
+function onPopupClose() {
+  if (currentOpenPopup) {
+    currentOpenPopup = null;
+  }
+}
+
+// Function to create enhanced popup with hover support
+function createEnhancedPopup(marker, content, categoryKey) {
+  const popup = L.popup({
+    className: 'enhanced-popup',
+    maxWidth: 300,
+    closeButton: true,
+    autoClose: false,
+    closeOnClick: false
+  }).setContent(content);
+  
+  // Bind popup to marker
+  marker.bindPopup(popup);
+  
+  // Handle popup events
+  marker.on('popupopen', () => onPopupOpen(popup));
+  marker.on('popupclose', () => onPopupClose(popup));
+  
+  // Add hover interactions
+  marker.on('mouseover', () => {
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+    }
+    if (!popup.isOpen()) {
+      popup.openPopup();
+    }
+  });
+  
+  marker.on('mouseout', () => {
+    closePopupAfterDelay(popup, 800);
+  });
+  
+  // Click to keep popup open
+  marker.on('click', () => {
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+    }
+    if (!popup.isOpen()) {
+      popup.openPopup();
+    }
+  });
+  
+  return popup;
+}
+
 // Helper: build a category-specific Leaflet DivIcon
 function buildTouristDivIcon(categoryKey) {
   const cat = TOURIST_CATEGORIES[categoryKey] || { emoji: '📍', color: '#2e7d32' };
@@ -226,7 +310,7 @@ async function fetchTomTomCategoryNear(lat, lon, categoryKey, key) {
 }
 
 async function fetchTomTomPOIs(routeGeometry, vehicleType, existingGrouped) {
-  const points = sampleRoutePoints(routeGeometry, 6);
+  const points = sampleRoutePoints(routeGeometry, 4); // Reduce from 6 to 4
   if (!points.length) return { grouped: {}, flat: [], enhanced: false };
   const [primary, secondary] = getTomTomKeyPair();
   const keyToUse = primary || secondary;
@@ -235,7 +319,7 @@ async function fetchTomTomPOIs(routeGeometry, vehicleType, existingGrouped) {
   // Limit categories to avoid hitting daily limits; skip categories already saturated from OSM
   const categoryKeys = Object.keys(TOMTOM_CATEGORY_MAP).filter(key => {
     const arr = existingGrouped && existingGrouped[key];
-    return !arr || arr.length < 15;
+    return !arr || arr.length < 5; // Reduce from 15 to 5
   });
 
   // If EV, ensure we include charging stations first
@@ -247,8 +331,8 @@ async function fetchTomTomPOIs(routeGeometry, vehicleType, existingGrouped) {
   let anySuccess = false;
   for (const p of points) {
     for (const cat of orderedCats) {
-      // soft cap to keep requests in check
-      if (aggregate.length > 500) break;
+      // Reduce soft cap from 500 to 200 for faster processing
+      if (aggregate.length > 200) break;
       try {
         const items = await fetchTomTomCategoryNear(p.lat, p.lon, cat, keyToUse);
         if (items && items.length) { anySuccess = true; aggregate.push(...items); }
@@ -263,7 +347,7 @@ async function fetchTomTomPOIs(routeGeometry, vehicleType, existingGrouped) {
   for (const place of deduped) {
     const key = place.category;
     if (!grouped[key]) grouped[key] = [];
-    if (grouped[key].length < 15) grouped[key].push(place);
+    if (grouped[key].length < 5) grouped[key].push(place); // Reduce from 15 to 5
   }
   const flat = Object.values(grouped).flat();
   return { grouped, flat, enhanced: anySuccess };
@@ -604,7 +688,7 @@ async function colorizeRouteByTraffic(routeGeometry, mainLayerToReplace) {
 }
 
 // Helper: compute bbox with small buffer from route geometry
-function computeBufferedBbox(routeGeometry, bufferDeg = 0.05) {
+function computeBufferedBbox(routeGeometry, bufferDeg = 0.03) { // Reduce from 0.05 to 0.03
   const coords = routeGeometry.coordinates;
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
   coords.forEach(([lon, lat]) => {
@@ -723,69 +807,99 @@ function determineCategory(tags) {
 function buildOverpassQuery(bbox) {
   const { south, west, north, east } = bbox;
   return `
-    [out:json][timeout:15];
+    [out:json][timeout:25];
     (
-      node["leisure"~"park|garden|nature_reserve"](${south},${west},${north},${east});
-      way["leisure"~"park|garden|nature_reserve"](${south},${west},${north},${east});
-      relation["leisure"~"park|garden|nature_reserve"](${south},${west},${north},${east});
+      // Parks and recreational areas
+      node["leisure"~"park|garden|nature_reserve|playground"](${south},${west},${north},${east});
+      way["leisure"~"park|garden|nature_reserve|playground"](${south},${west},${north},${east});
+      relation["leisure"~"park|garden|nature_reserve|playground"](${south},${west},${north},${east});
 
-      node["natural"~"beach|water"](${south},${west},${north},${east});
-      way["natural"~"beach|water"](${south},${west},${north},${east});
-      relation["natural"~"beach|water"](${south},${west},${north},${east});
+      // Natural features
+      node["natural"~"beach|water|wood|forest|peak|cliff"](${south},${west},${north},${east});
+      way["natural"~"beach|water|wood|forest|peak|cliff"](${south},${west},${north},${east});
+      relation["natural"~"beach|water|wood|forest|peak|cliff"](${south},${west},${north},${east});
 
-      node["waterway"="river"](${south},${west},${north},${east});
-      way["waterway"="river"](${south},${west},${north},${east});
-      relation["waterway"="river"](${south},${west},${north},${east});
+      // Water bodies
+      node["waterway"~"river|stream|canal"](${south},${west},${north},${east});
+      way["waterway"~"river|stream|canal"](${south},${west},${north},${east});
+      relation["waterway"~"river|stream|canal"](${south},${west},${north},${east});
 
-      node["tourism"~"monument|museum|attraction|hotel"](${south},${west},${north},${east});
-      way["tourism"~"monument|museum|attraction|hotel"](${south},${west},${north},${east});
-      relation["tourism"~"monument|museum|attraction|hotel"](${south},${west},${north},${east});
+      // Tourist attractions
+      node["tourism"~"hotel|museum|attraction|viewpoint|information"](${south},${west},${north},${east});
+      way["tourism"~"hotel|museum|attraction|viewpoint|information"](${south},${west},${north},${east});
+      relation["tourism"~"hotel|museum|attraction|viewpoint|information"](${south},${west},${north},${east});
 
-      node["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace"](${south},${west},${north},${east});
-      way["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace"](${south},${west},${north},${east});
-      relation["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace"](${south},${west},${north},${east});
+      // Amenities
+      node["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace|school|university|library|bank|post_office"](${south},${west},${north},${east});
+      way["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace|school|university|library|bank|post_office"](${south},${west},${north},${east});
+      relation["amenity"~"charging_station|fuel|hospital|atm|toilets|restaurant|cafe|cinema|marketplace|school|university|library|bank|post_office"](${south},${west},${north},${east});
 
-      node["historic"~"palace|castle|fort|monument"](${south},${west},${north},${east});
-      way["historic"~"palace|castle|fort|monument"](${south},${west},${north},${east});
-      relation["historic"~"palace|castle|fort|monument"](${south},${west},${north},${east});
+      // Historic sites
+      node["historic"~"monument|castle|fort|palace|ruins|archaeological_site"](${south},${west},${north},${east});
+      way["historic"~"monument|castle|fort|palace|ruins|archaeological_site"](${south},${west},${north},${east});
+      relation["historic"~"monument|castle|fort|palace|ruins|archaeological_site"](${south},${west},${north},${east});
 
-      node["natural"~"wood|forest"](${south},${west},${north},${east});
-      way["natural"~"wood|forest"](${south},${west},${north},${east});
-      relation["natural"~"wood|forest"](${south},${west},${north},${east});
+      // Religious sites
+      node["amenity"="place_of_worship"](${south},${west},${north},${east});
+      way["amenity"="place_of_worship"](${south},${west},${north},${east});
+      relation["amenity"="place_of_worship"](${south},${west},${north},${east});
 
-      node["shop"~"mall|supermarket"](${south},${west},${north},${east});
-      way["shop"~"mall|supermarket"](${south},${west},${north},${east});
-      relation["shop"~"mall|supermarket"](${south},${west},${north},${east});
+      // Shopping
+      node["shop"~"mall|supermarket|convenience|department_store"](${south},${west},${north},${east});
+      way["shop"~"mall|supermarket|convenience|department_store"](${south},${west},${north},${east});
+      relation["shop"~"mall|supermarket|convenience|department_store"](${south},${west},${north},${east});
+
+      // Landmarks and notable places
+      node["landmark"](${south},${west},${north},${east});
+      way["landmark"](${south},${west},${north},${east});
+      relation["landmark"](${south},${west},${north},${east});
     );
-    out center 120;
+    out center 200;
   `;
 }
 
 // Call Overpass API and return normalized elements
 async function searchComprehensivePlaces(routeGeometry) {
   try {
-    const bbox = computeBufferedBbox(routeGeometry, 0.03);
+    const bbox = computeBufferedBbox(routeGeometry, 0.05); // Increase buffer for better coverage
     const query = buildOverpassQuery(bbox);
     let data;
-    try {
-      const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: new URLSearchParams({ data: query })
-      }, 20000);
-      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-      data = await res.json();
-    } catch (e1) {
-      console.warn('Primary Overpass failed, trying mirror...');
-      const res2 = await fetchWithTimeout('https://overpass.kumi.systems/api/interpreter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: new URLSearchParams({ data: query })
-      }, 20000);
-      if (!res2.ok) throw new Error(`Overpass Mirror HTTP ${res2.status}`);
-      data = await res2.json();
+    
+    // Try multiple Overpass endpoints for better reliability
+    const endpoints = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.nchc.org.tw/api/interpreter',
+      'https://overpass.openstreetmap.fr/api/interpreter'
+    ];
+    
+    for (const endpoint of endpoints) {
+      try {
+        console.log(`Trying Overpass endpoint: ${endpoint}`);
+        const res = await fetchWithTimeout(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: new URLSearchParams({ data: query })
+        }, 30000); // Increase timeout to 30 seconds
+        
+        if (res.ok) {
+          data = await res.json();
+          console.log(`Success with ${endpoint}, found ${data.elements?.length || 0} elements`);
+          break;
+        } else {
+          console.warn(`HTTP ${res.status} from ${endpoint}`);
+        }
+      } catch (e) {
+        console.warn(`Failed to query ${endpoint}:`, e.message);
+        continue;
+      }
     }
-    if (!data.elements) return [];
+    
+    if (!data || !data.elements) {
+      console.warn('All Overpass endpoints failed, trying fallback search...');
+      return await fallbackLandmarkSearch(bbox);
+    }
+    
     const elements = data.elements
       .map(el => {
         const lat = el.lat || (el.center && el.center.lat);
@@ -795,10 +909,19 @@ async function searchComprehensivePlaces(routeGeometry) {
         return { id: `${el.type}/${el.id}`, lat, lon, tags, name: getPlaceName(tags) };
       })
       .filter(Boolean);
+    
+    console.log(`Successfully processed ${elements.length} elements from Overpass`);
     return elements;
   } catch (e) {
     console.error('Overpass error:', e);
-    return [];
+    // Try fallback search
+    try {
+      const bbox = computeBufferedBbox(routeGeometry, 0.05);
+      return await fallbackLandmarkSearch(bbox);
+    } catch (fallbackError) {
+      console.error('Fallback search also failed:', fallbackError);
+      return [];
+    }
   }
 }
 
@@ -807,92 +930,127 @@ async function searchComprehensivePlacesSegmented(routeGeometry) {
   const coords = routeGeometry.coordinates; // [lon,lat]
   if (!coords || coords.length === 0) return [];
 
-  // Sample up to 12 evenly spaced points along the route
-  const maxSamples = 12;
+  // Increase samples for better coverage
+  const maxSamples = 8; // Increase from 6 to 8
   const step = Math.max(1, Math.floor(coords.length / maxSamples));
   const samples = [];
   for (let i = 0; i < coords.length; i += step) samples.push(coords[i]);
   if (samples[samples.length - 1] !== coords[coords.length - 1]) samples.push(coords[coords.length - 1]);
 
   const aggregate = [];
+  const endpoints = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.nchc.org.tw/api/interpreter'
+  ];
+
   for (let i = 0; i < samples.length; i++) {
     const [lon, lat] = samples[i];
-    // Small bbox around sample point
+    // Increase bbox size for better coverage
     const bbox = { south: lat - 0.02, west: lon - 0.02, north: lat + 0.02, east: lon + 0.02 };
     const query = buildOverpassQuery(bbox);
-    try {
-      const res = await fetchWithTimeout('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-        body: new URLSearchParams({ data: query })
-      }, 15000);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && Array.isArray(data.elements)) {
-          for (const el of data.elements) {
-            const latEl = el.lat || (el.center && el.center.lat);
-            const lonEl = el.lon || (el.center && el.center.lon);
-            const tags = el.tags || {};
-            if (latEl == null || lonEl == null) continue;
-            aggregate.push({ id: `${el.type}/${el.id}`, lat: latEl, lon: lonEl, tags, name: getPlaceName(tags) });
-          }
-        }
-      }
-    } catch (e) {
-      // try mirror quickly for this segment
+    
+    let success = false;
+    for (const endpoint of endpoints) {
       try {
-        const res2 = await fetchWithTimeout('https://overpass.kumi.systems/api/interpreter', {
+        const res = await fetchWithTimeout(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
           body: new URLSearchParams({ data: query })
-        }, 15000);
-        if (res2.ok) {
-          const data2 = await res2.json();
-          if (data2 && Array.isArray(data2.elements)) {
-            for (const el of data2.elements) {
+        }, 15000); // Increase timeout
+        
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.elements)) {
+            for (const el of data.elements) {
               const latEl = el.lat || (el.center && el.center.lat);
               const lonEl = el.lon || (el.center && el.center.lon);
               const tags = el.tags || {};
               if (latEl == null || lonEl == null) continue;
-              aggregate.push({ id: `${el.type}/${el.id}`, lat: latEl, lon: lonEl, tags, name: getPlaceName(tags) });
+              aggregate.push({ 
+                id: `${el.type}/${el.id}`, 
+                lat: latEl, 
+                lon: lonEl, 
+                tags, 
+                name: getPlaceName(tags) 
+              });
             }
+            success = true;
+            break; // Success with this endpoint, move to next sample
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        console.warn(`Failed to query ${endpoint} for sample ${i}:`, e.message);
+        continue; // Try next endpoint
+      }
     }
-    // Soft cap to avoid overload
-    if (aggregate.length > 600) break;
+    
+    // If all endpoints failed for this sample, try Nominatim fallback
+    if (!success) {
+      try {
+        const fallbackResults = await fallbackLandmarkSearch(bbox);
+        aggregate.push(...fallbackResults);
+      } catch (fallbackError) {
+        console.warn(`Fallback search failed for sample ${i}:`, fallbackError.message);
+      }
+    }
+    
+      // Increase soft cap for much better coverage
+  if (aggregate.length > 800) break; // Increase from 500 to 800
   }
+  
+  console.log(`Segmented search found ${aggregate.length} total places`);
   return aggregate;
 }
 
 // Filter all places to those along the route and categorize
-async function findAllTouristPlacesAlongRoute(routeGeometry, corridorMeters = 1000) {
+async function findAllTouristPlacesAlongRoute(routeGeometry, corridorMeters = 1200) { // Increase from 800 to 1200
   let allPlaces = await searchComprehensivePlaces(routeGeometry);
   if (!allPlaces.length) {
     // Fallback to segmented strategy when bbox query returns empty or is rate-limited
+    console.log('Primary search returned no results, trying segmented search...');
     allPlaces = await searchComprehensivePlacesSegmented(routeGeometry);
   }
-  if (!allPlaces.length) return { grouped: {}, flat: [] };
+  
+  if (!allPlaces.length) {
+    console.warn('Both primary and segmented search failed, trying emergency fallback...');
+    // Emergency fallback: use a very wide search area
+    const emergencyBbox = computeBufferedBbox(routeGeometry, 0.1); // Very wide buffer
+    allPlaces = await fallbackLandmarkSearch(emergencyBbox);
+  }
+  
+  if (!allPlaces.length) {
+    console.error('All search methods failed - no landmarks found');
+    return { grouped: {}, flat: [] };
+  }
+  
+  console.log(`Found ${allPlaces.length} total places before filtering`);
+  
+  // Increase corridor width for better coverage
   const withinCorridor = allPlaces.filter(p => {
     const d = distancePointToPolylineMeters(p.lat, p.lon, routeGeometry.coordinates);
     return d <= corridorMeters;
   });
+  
+  console.log(`${withinCorridor.length} places within ${corridorMeters}m corridor`);
+  
   const deduped = dedupeByLocation(withinCorridor);
   const categorized = deduped.map(p => {
     const cat = determineCategory(p.tags);
     return { ...p, category: cat };
   }).filter(p => !!p.category);
 
-  // Group and limit per category
+  // Group and limit per category (increase from 12 to 25 for much better coverage)
   const grouped = {};
   for (const key of Object.keys(TOURIST_CATEGORIES)) grouped[key] = [];
   for (const p of categorized) {
     const key = p.category;
     if (!grouped[key]) grouped[key] = [];
-    if (grouped[key].length < 15) grouped[key].push(p);
+    if (grouped[key].length < 25) grouped[key].push(p); // Increase from 12 to 25
   }
   const flat = Object.values(grouped).flat();
+  
+  console.log(`Final result: ${flat.length} landmarks in ${Object.keys(grouped).filter(k => grouped[k].length > 0).length} categories`);
   return { grouped, flat };
 }
 
@@ -945,6 +1103,9 @@ function showMap() {
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(map);
+      
+      // Setup popup management
+      setupMapPopupManagement();
     } else {
       map.invalidateSize();
     }
@@ -1029,16 +1190,35 @@ async function findRoute() {
   const sourceText = document.getElementById("source").value.trim();
   const destText = document.getElementById("destination").value.trim();
   const vehicleType = document.getElementById("vehicleType").value;
-  const vehicleYear = parseInt(document.getElementById("vehicleYear").value);
+  const fuelType = document.getElementById("fuelType").value;
+  const modelYear = parseInt(document.getElementById("modelYear").value) || 2020;
+  const engineSizeLiters = parseFloat(document.getElementById("engineSizeLiters").value);
+  const routeType = document.getElementById("routeType").value;
+  const traffic = document.getElementById("traffic").value;
+  const loadFactor = parseFloat(document.getElementById("loadFactor").value) || 1.0;
+  const claimedEfficiency = parseFloat(document.getElementById("claimedEfficiency").value);
+  const claimedEfficiencyUnit = document.getElementById("claimedEfficiencyUnit").value;
+  const electricitySource = document.getElementById("electricitySource").value;
 
   if (!sourceText || !destText) {
     document.getElementById("info-box").innerText = "---";
     alert("Please enter both source and destination.");
     return;
   }
+  
+  // Validate form before proceeding
+  if (typeof validateForm === 'function' && !validateForm()) {
+    alert("Please fix the form errors before calculating the route.");
+    return;
+  }
 
-  if (!vehicleYear || vehicleYear < 1980 || vehicleYear > new Date().getFullYear()) {
-    alert("Please enter a valid vehicle make year.");
+  // Validate vehicle type and fuel type compatibility
+  if (vehicleType === "electric" && fuelType !== "electric") {
+    alert("Electric vehicles should have 'Electric' as fuel type.");
+    return;
+  }
+  if (vehicleType === "hybrid" && fuelType !== "hybrid") {
+    alert("Hybrid vehicles should have 'Hybrid' as fuel type.");
     return;
   }
 
@@ -1050,6 +1230,13 @@ async function findRoute() {
     return;
   }
 
+  // Show loading state
+  const calculateButton = document.querySelector('button[onclick="findRoute()"]');
+  if (calculateButton) {
+    calculateButton.classList.add('loading');
+    calculateButton.disabled = true;
+  }
+  
   document.getElementById("sidebar").classList.remove("open");
   document.getElementById("homeSidebar").classList.add("hidden");
 
@@ -1059,6 +1246,9 @@ async function findRoute() {
   // Remove all previous route layers
   routeLayers.forEach(layer => map.removeLayer(layer));
   routeLayers = [];
+  
+  // Cleanup any existing tourist route
+  cleanupTouristRoute();
 
   sourceMarker = L.marker(sourceCoords).addTo(map).bindPopup("Source");
   destMarker = L.marker(destCoords).addTo(map).bindPopup("Destination");
@@ -1082,8 +1272,51 @@ async function findRoute() {
 
   const mainRoute = data.routes[0];
   const distance = (mainRoute.distance / 1000).toFixed(2);
-  const adjustedRate = adjustEmissionRate(emissionRates[vehicleType], vehicleYear);
-  const emissions = (distance * adjustedRate).toFixed(2);
+  const distanceUnit = 'km'; // Default to km since we're calculating from route
+  
+  // Use the emission calculator for accurate emissions
+  let emissions = 0;
+  let emissionBreakdown = null;
+  
+  try {
+    // Prepare inputs for emission calculator
+    const emissionInputs = {
+      vehicleType: vehicleType,
+      fuelType: fuelType,
+      distance: distance,
+      distanceUnit: distanceUnit,
+      routeType: routeType,
+      traffic: traffic,
+      modelYear: modelYear,
+      loadFactor: loadFactor,
+      engineSizeLiters: engineSizeLiters,
+      electricitySource: electricitySource
+    };
+    
+    // Add claimed efficiency if provided
+    if (claimedEfficiency && claimedEfficiencyUnit) {
+      emissionInputs.claimedEfficiency = claimedEfficiency;
+      emissionInputs.claimedEfficiencyUnit = claimedEfficiencyUnit;
+    }
+    
+    // Calculate emissions using the emission calculator
+    if (typeof EmissionCalculator !== 'undefined') {
+      const result = EmissionCalculator.estimateEmissions(emissionInputs);
+      emissions = result.totalEmissionsGramsCO2;
+      emissionBreakdown = result.breakdown;
+    } else {
+      // Fallback to simple calculation if emission calculator not available
+      const adjustedRate = adjustEmissionRate(emissionRates[vehicleType] || emissionRates.petrol, modelYear || 2020);
+      emissions = (distance * adjustedRate);
+    }
+  } catch (error) {
+    console.error("Emission calculation error:", error);
+    // Fallback calculation
+    const adjustedRate = adjustEmissionRate(emissionRates[vehicleType] || emissionRates.petrol, modelYear || 2020);
+    emissions = (distance * adjustedRate);
+  }
+  
+  const emissionsFormatted = emissions.toFixed(2);
 
   const suggestion = await getVehicleSuggestion(distance);
 
@@ -1119,8 +1352,17 @@ async function findRoute() {
       source: sourceText,
       destination: destText,
       vehicleType,
-      vehicleYear,
+      fuelType,
+      modelYear,
+      engineSizeLiters,
       distance: parseFloat(distance),
+      distanceUnit,
+      routeType,
+      traffic,
+      loadFactor,
+      claimedEfficiency,
+      claimedEfficiencyUnit,
+      electricitySource,
       emissions: parseFloat(emissions),
       ecoTip, // Save tip as well
       routeSource: lastGeocodeProvider === 'tomtom' ? 'TomTom+OSM' : 'OSM'
@@ -1148,9 +1390,21 @@ async function findRoute() {
   }
 
   let infoHTML = `
-    <strong>Distance:</strong> ${distance} km<br>
-    <strong>${vehicleType.toUpperCase()} (${vehicleYear}) Emissions:</strong> ${emissions} g CO₂
+    <strong>Distance:</strong> ${distance} ${distanceUnit} (Route: ${distance} km)<br>
+    <strong>Vehicle:</strong> ${vehicleType.toUpperCase()} - ${fuelType}<br>
+    <strong>Emissions:</strong> ${emissionsFormatted} g CO₂
   `;
+  
+  // Add detailed emission breakdown if available
+  if (emissionBreakdown) {
+    infoHTML += `<br><strong>Emission Details:</strong><br>`;
+    infoHTML += `• Base consumption: ${emissionBreakdown.baseConsumptionPer100Km?.value || 'N/A'} ${emissionBreakdown.baseConsumptionPer100Km?.unit || ''}<br>`;
+    infoHTML += `• Adjusted consumption: ${emissionBreakdown.adjustedConsumptionPer100Km?.value?.toFixed(2) || 'N/A'} ${emissionBreakdown.adjustedConsumptionPer100Km?.unit || ''}<br>`;
+    if (emissionBreakdown.factorsApplied) {
+      const factors = emissionBreakdown.factorsApplied;
+      infoHTML += `• Factors: Age: ${factors.ageYears || 0}yr, Route: ${factors.routeType}, Traffic: ${factors.traffic}, Load: ${factors.loadFactor || 1.0}x<br>`;
+    }
+  }
 
   if (suggestion) {
     infoHTML += `<br><strong>Recommended:</strong> ${suggestion.best.type.toUpperCase()} (⏱ ${suggestion.best.time} hrs, 🌿 ${suggestion.best.emission}g CO₂)`;
@@ -1198,6 +1452,12 @@ async function findRoute() {
       loadRecent();
     }
   } catch (_) {}
+  
+  // Remove loading state
+  if (calculateButton) {
+    calculateButton.classList.remove('loading');
+    calculateButton.disabled = false;
+  }
 }
 
 // Enhanced tourist route function: comprehensive attractions along the route
@@ -1205,16 +1465,12 @@ async function findTouristRoute() {
   const sourceText = document.getElementById("source").value.trim();
   const destText = document.getElementById("destination").value.trim();
   const vehicleType = document.getElementById("vehicleType").value;
-  const vehicleYear = parseInt(document.getElementById("vehicleYear").value);
+  const fuelType = document.getElementById("fuelType").value;
+  const modelYear = parseInt(document.getElementById("modelYear").value) || 2020;
 
   if (!sourceText || !destText) {
     document.getElementById("info-box").innerText = "---";
     alert("Please enter both source and destination.");
-    return;
-  }
-
-  if (!vehicleYear || vehicleYear < 1980 || vehicleYear > new Date().getFullYear()) {
-    alert("Please enter a valid vehicle make year.");
     return;
   }
 
@@ -1258,7 +1514,7 @@ async function findTouristRoute() {
 
   const mainRoute = data.routes[0];
   const distanceKm = (mainRoute.distance / 1000).toFixed(2);
-  const adjustedRate = adjustEmissionRate(emissionRates[vehicleType], vehicleYear);
+  const adjustedRate = adjustEmissionRate(emissionRates[vehicleType] || emissionRates.petrol, modelYear);
   const emissions = (distanceKm * adjustedRate).toFixed(2);
 
   // Draw the main route
@@ -1267,17 +1523,46 @@ async function findTouristRoute() {
   }).addTo(map);
   routeLayers.push(mainRouteLayer);
 
-  // Traffic + Weather for tourist flow
-  try { await ensureApiKeyRoles(); } catch(_) {}
-  try { addTrafficTileOverlays(); } catch(_) {}
+  // Traffic + Weather for tourist flow (skip if taking too long)
   let tSummary = null; let wPoints = [];
-  try { tSummary = await fetchTrafficSummary(mainRoute.geometry); } catch(_) {}
-  try { wPoints = await fetchWeatherAlongRoute(mainRoute.geometry); } catch(_) {}
+  try { 
+    const trafficPromise = ensureApiKeyRoles();
+    const trafficTimeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Traffic timeout')), 8000); // 8 second timeout
+    });
+    await Promise.race([trafficPromise, trafficTimeoutPromise]);
+  } catch(_) {}
+  
+  try { 
+    const overlayPromise = addTrafficTileOverlays();
+    const overlayTimeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Overlay timeout')), 5000); // 5 second timeout
+    });
+    await Promise.race([overlayPromise, overlayTimeoutPromise]);
+  } catch(_) {}
+  
+  try { 
+    const summaryPromise = fetchTrafficSummary(mainRoute.geometry);
+    const summaryTimeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Summary timeout')), 6000); // 6 second timeout
+    });
+    tSummary = await Promise.race([summaryPromise, summaryTimeoutPromise]);
+  } catch(_) {}
+  
+  try { 
+    const weatherPromise = fetchWeatherAlongRoute(mainRoute.geometry);
+    const weatherTimeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Weather timeout')), 6000); // 6 second timeout
+    });
+    wPoints = await Promise.race([weatherPromise, weatherTimeoutPromise]);
+  } catch(_) {}
+  
   lastTrafficWeatherHtml = buildTrafficWeatherSnippet(tSummary, wPoints);
-  // Replace with segment-by-segment coloring for tourist flow
-  try { await colorizeRouteByTraffic(mainRoute.geometry, mainRouteLayer); } catch(_) {}
+  
+  // Skip heavy traffic coloring for tourist routes to improve performance
+  // try { await colorizeRouteByTraffic(mainRoute.geometry, mainRouteLayer); } catch(_) {}
 
-  // Loading state
+  // Loading state with progress
   document.getElementById("info-box").innerHTML = `
     <div class="info-header">
       <span>Tourist Attractions</span>
@@ -1289,18 +1574,71 @@ async function findTouristRoute() {
       <div class="tourist-loading">
         <div class="spinner"></div>
         <div><strong>Searching attractions along your route...</strong><br><small>This may take a few seconds</small></div>
+        <div class="progress-bar">
+          <div class="progress-fill"></div>
+        </div>
       </div>
     </div>
   `;
 
+  // Simulate progress for better UX
+  const progressFill = document.querySelector('.progress-fill');
+  let progress = 0;
+  const progressInterval = setInterval(() => {
+    progress += Math.random() * 15;
+    if (progress > 90) progress = 90;
+    if (progressFill) progressFill.style.width = progress + '%';
+  }, 200);
+
   // Find comprehensive places along the route from OSM
-  const { grouped: osmGrouped, flat: osmFlat } = await findAllTouristPlacesAlongRoute(mainRoute.geometry, 1500);
+  const searchPromise = findAllTouristPlacesAlongRoute(mainRoute.geometry, 1200); // Increase from 800 to 1200
+  
+  // Add timeout to prevent hanging
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Search timeout')), 35000); // Increase from 25 to 35 seconds
+  });
+  
+  let osmGrouped, osmFlat;
+  try {
+    console.log('Starting landmark search...');
+    const result = await Promise.race([searchPromise, timeoutPromise]);
+    osmGrouped = result.grouped;
+    osmFlat = result.flat;
+    console.log(`Landmark search completed: ${Object.keys(osmGrouped).filter(k => osmGrouped[k].length > 0).length} categories with landmarks`);
+  } catch (error) {
+    console.warn('OSM search failed or timed out:', error);
+    // Try emergency fallback
+    try {
+      console.log('Attempting emergency fallback search...');
+      const emergencyBbox = computeBufferedBbox(mainRoute.geometry, 0.15);
+      const emergencyResults = await fallbackLandmarkSearch(emergencyBbox);
+      osmGrouped = {};
+      osmFlat = emergencyResults;
+      
+      // Categorize emergency results
+      for (const place of emergencyResults) {
+        const cat = place.category || 'monuments';
+        if (!osmGrouped[cat]) osmGrouped[cat] = [];
+        osmGrouped[cat].push(place);
+      }
+      console.log(`Emergency fallback found ${emergencyResults.length} landmarks`);
+    } catch (emergencyError) {
+      console.error('Emergency fallback also failed:', emergencyError);
+      osmGrouped = {};
+      osmFlat = [];
+    }
+  }
 
   // Fetch supplemental POIs from TomTom and merge
   let mergedGrouped = {};
   let mergedFlat = [];
   try {
-    const tom = await fetchTomTomPOIs(mainRoute.geometry, vehicleType, osmGrouped);
+    const tomPromise = fetchTomTomPOIs(mainRoute.geometry, vehicleType, osmGrouped);
+    const tomTimeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('TomTom timeout')), 15000); // 15 second timeout
+    });
+    
+    const tom = await Promise.race([tomPromise, tomTimeoutPromise]);
     lastTouristDataEnhanced = !!tom.enhanced;
     // initialize merged with OSM
     for (const key of Object.keys(TOURIST_CATEGORIES)) {
@@ -1309,21 +1647,22 @@ async function findTouristRoute() {
     // merge TomTom
     for (const key of Object.keys(TOURIST_CATEGORIES)) {
       const list = tom.grouped && Array.isArray(tom.grouped[key]) ? tom.grouped[key] : [];
-      if (list.length) {
-        mergedGrouped[key].push(...list);
-        // dedupe and cap
-        mergedGrouped[key] = dedupeByLocation(mergedGrouped[key]).slice(0, 15);
-      }
+              if (list.length) {
+          mergedGrouped[key].push(...list);
+          // dedupe and cap - increase limit for more landmarks
+          mergedGrouped[key] = dedupeByLocation(mergedGrouped[key]).slice(0, 20); // Increase from 8 to 20
+        }
     }
     mergedFlat = Object.values(mergedGrouped).flat();
-  } catch (_) {
+  } catch (error) {
+    console.warn('TomTom search failed or timed out:', error);
     lastTouristDataEnhanced = false;
     mergedGrouped = osmGrouped;
     mergedFlat = osmFlat || [];
   }
 
   // Display markers
-  displayTouristAttractions(mergedGrouped);
+  const displayedGrouped = displayTouristAttractions(mergedGrouped);
 
   // Save summary to backend (optional, keeps existing save behavior consistent)
   try {
@@ -1334,7 +1673,7 @@ async function findTouristRoute() {
       source: sourceText,
       destination: destText,
       vehicleType,
-      vehicleYear,
+      modelYear,
         distance: parseFloat(distanceKm),
         emissions: parseFloat(emissions),
         routeSource: lastTouristDataEnhanced ? 'TomTom+OSM' : 'OSM'
@@ -1342,8 +1681,8 @@ async function findTouristRoute() {
     }).catch(() => {});
   } catch (_) {}
 
-  // Info panel
-  if (!mergedFlat || mergedFlat.length === 0) {
+  // Info panel - now use the displayedGrouped data
+  if (!displayedGrouped || Object.keys(displayedGrouped).every(key => !displayedGrouped[key] || displayedGrouped[key].length === 0)) {
     document.getElementById("info-box").innerHTML = `
       <div class="info-header">
         <span>Tourist Attractions</span>
@@ -1355,81 +1694,155 @@ async function findTouristRoute() {
         <div class="tourist-info-panel">
           <div class="summary">
             <div><strong>Distance:</strong> ${distanceKm} km</div>
-            <div><strong>${vehicleType.toUpperCase()} (${vehicleYear}) CO₂:</strong> ${emissions} g</div>
+            <div><strong>${vehicleType.toUpperCase()} (${modelYear}) CO₂:</strong> ${emissions} g</div>
           </div>
           <div style="color:#e6fff4">No attractions found within ~1 km of this route currently. Overpass may be rate-limited; try again shortly.</div>
         </div>
       </div>
     `;
-  } else {
-    // Append traffic/weather snippet if available
-    const addon = lastTrafficWeatherHtml || '';
-    displayTouristRouteInfo({
+    
+    // Update current data for real-time sync
+    updateCurrentTouristData({
       distanceKm,
       emissions,
       vehicleType,
-      vehicleYear,
-      grouped: mergedGrouped,
-      extraHtml: addon
+      modelYear,
+      grouped: {},
+      extraHtml: lastTrafficWeatherHtml || ''
     });
+  } else {
+    // Append traffic/weather snippet if available
+    const addon = lastTrafficWeatherHtml || '';
+    const touristData = {
+      distanceKm,
+      emissions,
+      vehicleType,
+      modelYear,
+      grouped: displayedGrouped, // Use the displayed data
+      extraHtml: addon
+    };
+    
+    // Update current data for real-time sync
+    updateCurrentTouristData(touristData);
+    
+    // Display the info
+    displayTouristRouteInfo(touristData);
   }
 
   // Best effort: refresh recent list
   try { if (typeof loadRecent === 'function') loadRecent(); } catch (_) {}
+
+  // Stop progress simulation
+  clearInterval(progressInterval);
+  
+  // Start periodic refresh of tourist info box
+  startTouristInfoBoxRefresh();
 }
 
-// Place markers on the map with category-specific styling
+// Place markers on the map with category-specific styling and enhanced interaction
 function displayTouristAttractions(grouped) {
+  console.log('Displaying tourist attractions:', grouped);
+  let totalMarkers = 0;
+  
+  // Clear existing markers first
+  markerByPlaceId.forEach(marker => {
+    try { map.removeLayer(marker); } catch(_) {}
+  });
+  markerByPlaceId.clear();
+  
+  // Close any existing popups
+  closeAllPopups();
+  
   Object.keys(grouped).forEach(key => {
     const cat = TOURIST_CATEGORIES[key];
     const places = grouped[key] || [];
+    console.log(`Category ${key}: ${places.length} places`);
+    
     places.forEach(async p => {
       const marker = L.marker([p.lat, p.lon], { icon: buildTouristDivIcon(key) }).addTo(map);
       markerByPlaceId.set(p.id || `${p.lat},${p.lon}`, marker);
-      const name = p.name || 'Unnamed';
-      const details = [];
-      if (p.tags.addr_full) details.push(p.tags.addr_full);
-      if (p.tags.opening_hours) details.push(`Hours: ${p.tags.opening_hours}`);
-      if (p.tags.phone) details.push(`☎ ${p.tags.phone}`);
-      if (p.tags.website) details.push(`<a href="${p.tags.website}" target="_blank">Website</a>`);
-      const osmUrl = `https://www.openstreetmap.org/${p.id}`;
-      // Try fetch an image
-      let imgUrl = null;
-      try { imgUrl = await fetchPlaceImage(p); } catch(_) {}
-      const popupHtml = buildPlacePopupHtml(cat, name, details, osmUrl, p.lat, p.lon, imgUrl);
-      marker.bindPopup(popupHtml, { maxWidth: 280 });
-      routeLayers.push(marker);
+      
+      // Use enhanced marker interaction system
+      setupMarkerInteraction(marker, p, key);
     });
+    
+    totalMarkers += places.length;
   });
+  
+  console.log(`Displayed ${totalMarkers} markers on map`);
+  return grouped;
 }
 
-// Render the info panel with categorized counts and lists
-function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYear, grouped, extraHtml }) {
+// Render the info panel with categorized counts and lists, ordered along the route
+function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, modelYear, grouped, extraHtml }) {
   let html = `
     <div class="tourist-info-panel">
       <div class="summary">
         <div><strong>Distance:</strong> ${distanceKm} km</div>
-        <div><strong>${vehicleType.toUpperCase()} (${vehicleYear}) CO₂:</strong> ${emissions} g</div>
+        <div><strong>${vehicleType.toUpperCase()} (${modelYear}) CO₂:</strong> ${emissions} g</div>
         ${lastTouristDataEnhanced ? '<div><small>Enhanced with TomTom data</small></div>' : '<div><small>Data from OSM</small></div>'}
         ${extraHtml ? `<div>${extraHtml}</div>` : ''}
-    </div>
-      <div class="categories">
+      </div>
   `;
 
+  // Count total landmarks found
+  let totalLandmarks = 0;
+  Object.keys(grouped).forEach(key => {
+    if (grouped[key] && Array.isArray(grouped[key])) {
+      totalLandmarks += grouped[key].length;
+    }
+  });
+
+  // Add total count with enhanced styling
+  if (totalLandmarks > 0) {
+    html += `<div class="total-landmarks">
+      <strong>🎯 Total Landmarks Found: ${totalLandmarks}</strong>
+      <div style="font-size: 12px; margin-top: 4px; color: #1e40af;">
+        Ordered from start (Madurai) to end (Chennai) along your route
+      </div>
+    </div>`;
+  }
+
+  // Display landmarks by category, ordered along the route
   Object.keys(TOURIST_CATEGORIES).forEach(key => {
     const cat = TOURIST_CATEGORIES[key];
-    const items = (grouped[key] || []).slice(0, 6);
-    const count = grouped[key] ? grouped[key].length : 0;
+    const items = grouped[key] || [];
+    const count = items.length;
     if (count === 0) return; // skip empty
+    
     html += `
       <div class="cat-section">
-        <div class="cat-header"><span class="chip" style="background:${cat.color}22; color:${cat.color}">${cat.emoji}</span>${cat.label} <span class="count">${count}</span></div>
+        <div class="cat-header">
+          <span class="chip" style="background:${cat.color}22; color:${cat.color}">${cat.emoji}</span>
+          ${cat.label} <span class="count">${count}</span>
+        </div>
         <ul class="cat-list">
-          ${items.map(p => `<li title="${p.name}" data-place-id="${p.id}">${p.name}</li>`).join('')}
+          ${items.map((p, index) => {
+            const routeProgress = p.routeProgress || 0;
+            const progressPercent = Math.round(routeProgress * 100);
+            const distanceFromRoute = p.routeDistance ? Math.round(p.routeDistance) : '?';
+            
+            return `<li title="${p.name} - ${progressPercent}% along route, ${distanceFromRoute}m from route" 
+                       data-place-id="${p.id}" 
+                       data-route-progress="${routeProgress}"
+                       data-distance-from-route="${distanceFromRoute}">
+              <div class="place-name">${p.name}</div>
+              <div class="place-distance">${progressPercent}%</div>
+            </li>`;
+          }).join('')}
         </ul>
       </div>
     `;
   });
+
+  // If no landmarks found, show a message
+  if (totalLandmarks === 0) {
+    html += `<div style="text-align: center; padding: 20px; color: #6b7280;">
+      <div style="font-size: 24px; margin-bottom: 10px;">🔍</div>
+      <div><strong>No landmarks found</strong></div>
+      <div style="font-size: 14px; margin-top: 5px;">Try adjusting your route or search parameters</div>
+    </div>`;
+  }
 
   html += `</div></div>`;
   const box = document.getElementById('info-box');
@@ -1444,20 +1857,46 @@ function displayTouristRouteInfo({ distanceKm, emissions, vehicleType, vehicleYe
   `;
   autoCollapseInfoBoxOnSmallScreens();
 
-  // Attach click handlers for list items to pan/zoom and open popup
+  // Enhanced click handlers for list items with route progress information
   try {
     const list = box.querySelectorAll('.cat-list li[data-place-id]');
     list.forEach(li => {
       li.addEventListener('click', () => {
         const pid = li.getAttribute('data-place-id');
+        const routeProgress = li.getAttribute('data-route-progress');
+        const distanceFromRoute = li.getAttribute('data-distance-from-route');
         const marker = markerByPlaceId.get(pid);
+        
         if (marker && map) {
           const latlng = marker.getLatLng();
+          
+          // Pan to marker with appropriate zoom level
           map.setView(latlng, Math.max(map.getZoom(), 16));
-          try { marker.openPopup(); } catch(_) {}
+          
+          // Highlight the clicked item in the list
+          box.querySelectorAll('.cat-list li').forEach(item => {
+            item.classList.remove('highlighted');
+          });
+          li.classList.add('highlighted');
+          
+          // Open popup with route information
+          try { 
+            marker.openPopup(); 
+          } catch(_) {}
+          
+          // Scroll the info box to keep the highlighted item visible
+          li.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
       });
     });
+  } catch (_) {}
+  
+  // Add map click handler to refresh info box when markers are clicked
+  try {
+    if (map) {
+      map.off('click', refreshTouristInfoBox);
+      map.on('click', refreshTouristInfoBox);
+    }
   } catch (_) {}
 }
 
@@ -1510,7 +1949,7 @@ async function findGreenPlacesAlongRoute(routeGeometry, sourceCoords, destCoords
 
     // Remove duplicates and limit results
     const uniquePlaces = removeDuplicatePlaces(greenPlaces);
-    return uniquePlaces.slice(0, 15); // Return max 15 places
+    return uniquePlaces.slice(0, 30); // Return max 30 places for better coverage
   } catch (error) {
     console.error('Error in findGreenPlacesAlongRoute:', error);
     return [];
@@ -1626,6 +2065,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const mapContainer = document.getElementById("mapContainer");
   const overlay = document.getElementById("sidebarOverlay");
 
+  // Setup keyboard support for popups
+  setupKeyboardPopupSupport();
+  
+  // Test landmark search functionality
+  setTimeout(() => {
+    testLandmarkSearch().then(success => {
+      if (success) {
+        console.log('✅ Landmark search test passed');
+      } else {
+        console.warn('⚠️ Landmark search test failed - landmarks may not be found');
+      }
+    });
+  }, 2000); // Test after 2 seconds
+
   // Close buttons inside both sidebars
   const closeButtons = document.querySelectorAll('.close-btn');
   closeButtons.forEach(btn => btn.addEventListener('click', () => {
@@ -1704,4 +2157,612 @@ async function useCurrentLocationForSource() {
   } catch (e) {
     console.error(e);
   }
+}
+
+// Function to refresh the tourist info box with current data
+function refreshTouristInfoBox() {
+  try {
+    const infoBox = document.getElementById('info-box');
+    if (!infoBox) return;
+    
+    // Check if we have current tourist data
+    if (window.currentTouristData) {
+      const { distanceKm, emissions, vehicleType, modelYear, grouped, extraHtml } = window.currentTouristData;
+      displayTouristRouteInfo({
+        distanceKm,
+        emissions,
+        vehicleType,
+        modelYear,
+        grouped,
+        extraHtml
+      });
+    }
+  } catch (error) {
+    console.warn('Error refreshing tourist info box:', error);
+  }
+}
+
+// Function to update current tourist data for real-time sync
+function updateCurrentTouristData(data) {
+  window.currentTouristData = data;
+}
+
+// Function to handle marker clicks and highlight in info box
+function handleMarkerClick(marker, placeId) {
+  try {
+    // Highlight the clicked item in the info box
+    const infoBox = document.getElementById('info-box');
+    if (infoBox) {
+      // Remove previous highlights
+      const prevHighlighted = infoBox.querySelectorAll('.highlighted');
+      prevHighlighted.forEach(el => el.classList.remove('highlighted'));
+      
+      // Highlight the clicked item
+      const listItem = infoBox.querySelector(`li[data-place-id="${placeId}"]`);
+      if (listItem) {
+        listItem.classList.add('highlighted');
+        listItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+    
+    // Refresh the info box to ensure it's up to date
+    refreshTouristInfoBox();
+  } catch (error) {
+    console.warn('Error handling marker click:', error);
+  }
+}
+
+// Function to start periodic refresh of tourist info box
+function startTouristInfoBoxRefresh() {
+  // Clear any existing interval
+  if (window.touristInfoBoxInterval) {
+    clearInterval(window.touristInfoBoxInterval);
+  }
+  
+  // Set up periodic refresh every 5 seconds
+  window.touristInfoBoxInterval = setInterval(() => {
+    if (window.currentTouristData) {
+      refreshTouristInfoBox();
+    }
+  }, 5000);
+}
+
+// Function to stop periodic refresh
+function stopTouristInfoBoxRefresh() {
+  if (window.touristInfoBoxInterval) {
+    clearInterval(window.touristInfoBoxInterval);
+    window.touristInfoBoxInterval = null;
+  }
+}
+
+// Function to cleanup tourist route resources
+function cleanupTouristRoute() {
+  stopTouristInfoBoxRefresh();
+  window.currentTouristData = null;
+  
+  // Clear markers
+  markerByPlaceId.forEach(marker => {
+    try { map.removeLayer(marker); } catch(_) {}
+  });
+  markerByPlaceId.clear();
+}
+
+// Function to setup map popup management
+function setupMapPopupManagement() {
+  if (!map) return;
+  
+  // Close popups when map is clicked
+  map.on('click', (e) => {
+    // Only close if clicking on the map itself, not on markers
+    if (e.originalEvent.target.classList.contains('leaflet-interactive') ||
+        e.originalEvent.target.classList.contains('leaflet-map-pane')) {
+      closeAllPopups();
+    }
+  });
+  
+  // Close popups when map is moved
+  map.on('moveend', () => {
+    closeAllPopups();
+  });
+  
+  // Close popups when zooming
+  map.on('zoomend', () => {
+    closeAllPopups();
+  });
+  
+  // Close popups when dragging starts
+  map.on('dragstart', () => {
+    closeAllPopups();
+  });
+}
+
+// Function to handle keyboard interactions for popups
+function setupKeyboardPopupSupport() {
+  document.addEventListener('keydown', (e) => {
+    // Escape key closes all popups
+    if (e.key === 'Escape') {
+      closeAllPopups();
+    }
+    
+    // Tab key navigation support for popups
+    if (e.key === 'Tab' && currentOpenPopup) {
+      const popupElement = currentOpenPopup.getElement();
+      if (popupElement) {
+        const focusableElements = popupElement.querySelectorAll(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        
+        if (focusableElements.length > 0) {
+          if (e.shiftKey) {
+            // Shift+Tab: focus previous element
+            if (document.activeElement === focusableElements[0]) {
+              e.preventDefault();
+              focusableElements[focusableElements.length - 1].focus();
+            }
+          } else {
+            // Tab: focus next element
+            if (document.activeElement === focusableElements[focusableElements.length - 1]) {
+              e.preventDefault();
+              focusableElements[0].focus();
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+// Fallback landmark search using Nominatim when Overpass fails
+async function fallbackLandmarkSearch(bbox) {
+  console.log('Using fallback Nominatim search for landmarks...');
+  const { south, west, north, east } = bbox;
+  
+  // Search queries for different types of landmarks
+  const searchQueries = [
+    'park', 'garden', 'museum', 'temple', 'church', 'mosque', 'hospital', 'school', 'university',
+    'restaurant', 'cafe', 'hotel', 'shopping mall', 'market', 'bank', 'atm', 'fuel station',
+    'charging station', 'lake', 'river', 'beach', 'forest', 'mountain', 'viewpoint', 'monument',
+    'castle', 'fort', 'palace', 'ruins', 'cinema', 'theater', 'library', 'post office'
+  ];
+  
+  const allPlaces = [];
+  const centerLat = (south + north) / 2;
+  const centerLon = (west + east) / 2;
+  
+  for (const query of searchQueries) {
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&viewbox=${west},${north},${east},${south}&bounded=1&limit=10`;
+      const res = await fetchWithTimeout(url, {
+        headers: { 'Accept': 'application/json' }
+      }, 10000);
+      
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          data.forEach(place => {
+            if (place.lat && place.lon) {
+              const category = determineCategoryFromNominatim(place, query);
+              allPlaces.push({
+                id: `nominatim/${place.place_id}`,
+                lat: parseFloat(place.lat),
+                lon: parseFloat(place.lon),
+                name: place.display_name.split(',')[0] || place.display_name,
+                tags: {
+                  source: 'nominatim',
+                  category: category,
+                  display_name: place.display_name
+                },
+                category: category
+              });
+            }
+          });
+        }
+      }
+      
+      // Small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } catch (error) {
+      console.warn(`Failed to search for "${query}":`, error.message);
+      continue;
+    }
+  }
+  
+  // Remove duplicates and limit results
+  const uniquePlaces = dedupeByLocation(allPlaces);
+  console.log(`Fallback search found ${uniquePlaces.length} unique places`);
+  return uniquePlaces;
+}
+
+// Determine category from Nominatim search results
+function determineCategoryFromNominatim(place, query) {
+  const displayName = place.display_name.toLowerCase();
+  const placeType = place.type;
+  
+  // Map search queries to our categories
+  if (query.includes('park') || query.includes('garden')) return 'parks';
+  if (query.includes('museum')) return 'museums';
+  if (query.includes('temple') || query.includes('church') || query.includes('mosque')) return 'temples';
+  if (query.includes('hospital')) return 'hospitals';
+  if (query.includes('restaurant')) return 'restaurants';
+  if (query.includes('cafe')) return 'cafes';
+  if (query.includes('hotel')) return 'hotels';
+  if (query.includes('shopping') || query.includes('mall')) return 'malls';
+  if (query.includes('market')) return 'markets';
+  if (query.includes('bank') || query.includes('atm')) return 'atms';
+  if (query.includes('fuel') || query.includes('station')) return 'fuel';
+  if (query.includes('charging')) return 'ev';
+  if (query.includes('lake') || query.includes('river')) return 'lakes';
+  if (query.includes('beach')) return 'beaches';
+  if (query.includes('forest') || query.includes('wood')) return 'forests';
+  if (query.includes('mountain') || query.includes('peak')) return 'monuments';
+  if (query.includes('castle') || query.includes('fort') || query.includes('palace')) return 'forts';
+  if (query.includes('cinema') || query.includes('theater')) return 'cinemas';
+  if (query.includes('library')) return 'museums';
+  if (query.includes('monument')) return 'monuments';
+  
+  // Try to determine from place type and display name
+  if (placeType === 'amenity') {
+    if (displayName.includes('park')) return 'parks';
+    if (displayName.includes('hospital')) return 'hospitals';
+    if (displayName.includes('restaurant')) return 'restaurants';
+    if (displayName.includes('cafe')) return 'cafes';
+    if (displayName.includes('hotel')) return 'hotels';
+    if (displayName.includes('school') || displayName.includes('university')) return 'museums';
+  }
+  
+  if (placeType === 'tourism') {
+    if (displayName.includes('museum')) return 'museums';
+    if (displayName.includes('hotel')) return 'hotels';
+    if (displayName.includes('attraction')) return 'monuments';
+  }
+  
+  if (placeType === 'historic') {
+    if (displayName.includes('castle')) return 'forts';
+    if (displayName.includes('fort')) return 'forts';
+    if (displayName.includes('palace')) return 'palaces';
+    if (displayName.includes('monument')) return 'monuments';
+  }
+  
+  if (placeType === 'leisure') {
+    if (displayName.includes('park')) return 'parks';
+    if (displayName.includes('garden')) return 'gardens';
+  }
+  
+  if (placeType === 'natural') {
+    if (displayName.includes('water')) return 'lakes';
+    if (displayName.includes('wood') || displayName.includes('forest')) return 'forests';
+    if (displayName.includes('beach')) return 'beaches';
+  }
+  
+  // Default fallback
+  return 'monuments';
+}
+
+// Test function to verify landmark search functionality
+async function testLandmarkSearch() {
+  console.log('Testing landmark search functionality...');
+  
+  // Test with a simple bbox around a known location (e.g., Delhi)
+  const testBbox = {
+    south: 28.4,
+    west: 77.0,
+    north: 28.8,
+    east: 77.4
+  };
+  
+  try {
+    console.log('Testing fallback search...');
+    const results = await fallbackLandmarkSearch(testBbox);
+    console.log(`Fallback search test: Found ${results.length} landmarks`);
+    
+    if (results.length > 0) {
+      console.log('Sample landmarks found:');
+      results.slice(0, 5).forEach(place => {
+        console.log(`- ${place.name} (${place.category}) at ${place.lat}, ${place.lon}`);
+      });
+    }
+    
+    return results.length > 0;
+  } catch (error) {
+    console.error('Landmark search test failed:', error);
+    return false;
+  }
+}
+
+// Function to order landmarks along the route from start to end
+function orderLandmarksAlongRoute(landmarks, routeGeometry) {
+  if (!landmarks || !landmarks.length || !routeGeometry) {
+    return landmarks;
+  }
+
+  try {
+    // Get route coordinates
+    const routeCoords = routeGeometry.coordinates || [];
+    if (routeCoords.length === 0) {
+      console.warn('No route coordinates available for ordering');
+      return landmarks;
+    }
+
+    // Calculate distance from start of route for each landmark
+    const landmarksWithDistance = landmarks.map(landmark => {
+      let minDistance = Infinity;
+      let routeIndex = 0;
+
+      // Find the closest point on the route for this landmark
+      for (let i = 0; i < routeCoords.length; i++) {
+        const routePoint = routeCoords[i];
+        const distance = distancePointToPolylineMeters(
+          landmark.lat, 
+          landmark.lon, 
+          [routePoint]
+        );
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          routeIndex = i;
+        }
+      }
+
+      return {
+        ...landmark,
+        routeDistance: minDistance,
+        routeIndex: routeIndex,
+        routeProgress: i / (routeCoords.length - 1) // 0 = start, 1 = end
+      };
+    });
+
+    // Sort by route progress (from start to end)
+    landmarksWithDistance.sort((a, b) => {
+      // Primary sort: route progress (start to end)
+      if (Math.abs(a.routeProgress - b.routeProgress) > 0.1) {
+        return a.routeProgress - b.routeProgress;
+      }
+      // Secondary sort: distance from route (closer landmarks first)
+      return a.routeDistance - b.routeDistance;
+    });
+
+    console.log(`Ordered ${landmarksWithDistance.length} landmarks along route from start to end`);
+    return landmarksWithDistance;
+  } catch (error) {
+    console.error('Error ordering landmarks along route:', error);
+    return landmarks;
+  }
+}
+
+// Enhanced function to find and order tourist places along the route
+async function findAllTouristPlacesAlongRoute(routeGeometry, corridorMeters = 1200) {
+  let allPlaces = await searchComprehensivePlaces(routeGeometry);
+  if (!allPlaces.length) {
+    console.log('Primary search returned no results, trying segmented search...');
+    allPlaces = await searchComprehensivePlacesSegmented(routeGeometry);
+  }
+  
+  if (!allPlaces.length) {
+    console.warn('Both primary and segmented search failed, trying emergency fallback...');
+    const emergencyBbox = computeBufferedBbox(routeGeometry, 0.1);
+    allPlaces = await fallbackLandmarkSearch(emergencyBbox);
+  }
+  
+  if (!allPlaces.length) {
+    console.error('All search methods failed - no landmarks found');
+    return { grouped: {}, flat: [] };
+  }
+  
+  console.log(`Found ${allPlaces.length} total places before filtering`);
+  
+  // Filter places within corridor
+  const withinCorridor = allPlaces.filter(p => {
+    const d = distancePointToPolylineMeters(p.lat, p.lon, routeGeometry.coordinates);
+    return d <= corridorMeters;
+  });
+  
+  console.log(`${withinCorridor.length} places within ${corridorMeters}m corridor`);
+  
+  const deduped = dedupeByLocation(withinCorridor);
+  const categorized = deduped.map(p => {
+    const cat = determineCategory(p.tags);
+    return { ...p, category: cat };
+  }).filter(p => !!p.category);
+
+  // Group and limit per category (increased for better coverage)
+  const grouped = {};
+  for (const key of Object.keys(TOURIST_CATEGORIES)) grouped[key] = [];
+  
+  for (const p of categorized) {
+    const key = p.category;
+    if (!grouped[key]) grouped[key] = [];
+    if (grouped[key].length < 30) grouped[key].push(p); // Increased from 25 to 30
+  }
+
+  // Order landmarks within each category along the route
+  Object.keys(grouped).forEach(key => {
+    if (grouped[key].length > 0) {
+      grouped[key] = orderLandmarksAlongRoute(grouped[key], routeGeometry);
+    }
+  });
+
+  const flat = Object.values(grouped).flat();
+  
+  console.log(`Final result: ${flat.length} landmarks in ${Object.keys(grouped).filter(k => grouped[k].length > 0).length} categories, ordered along route`);
+  return { grouped, flat };
+}
+
+// Enhanced popup management with better cursor interaction
+
+// Function to close all open popups
+function closeAllPopups() {
+  if (currentOpenPopup) {
+    try {
+      currentOpenPopup.closePopup();
+    } catch (_) {}
+    currentOpenPopup = null;
+  }
+}
+
+// Function to close popup after delay (for hover interactions)
+function closePopupAfterDelay(popup, delay = 1500) {
+  if (hoverTimeout) {
+    clearTimeout(hoverTimeout);
+  }
+  hoverTimeout = setTimeout(() => {
+    if (popup && popup.isOpen() && popup !== currentOpenPopup) {
+      popup.closePopup();
+    }
+  }, delay);
+}
+
+// Function to handle popup open event
+function onPopupOpen(popup) {
+  closeAllPopups();
+  currentOpenPopup = popup;
+}
+
+// Function to handle popup close event
+function onPopupClose() {
+  if (currentOpenPopup) {
+    currentOpenPopup = null;
+  }
+}
+
+// Enhanced marker hover and click handling
+function setupMarkerInteraction(marker, place, category) {
+  const cat = TOURIST_CATEGORIES[category];
+  
+  // Create enhanced popup content with route information
+  const routeProgress = place.routeProgress || 0;
+  const progressPercent = Math.round(routeProgress * 100);
+  const distanceFromRoute = place.routeDistance ? Math.round(place.routeDistance) : '?';
+  
+  const popupContent = `
+    <div class="tourist-popup">
+      <div class="popup-header" style="border-bottom: 2px solid ${cat.color}; padding-bottom: 8px; margin-bottom: 12px;">
+        <h4 style="margin: 0; color: ${cat.color}; font-size: 16px;">${cat.emoji} ${place.name}</h4>
+        <div style="font-size: 12px; color: #666; margin-top: 4px;">${cat.label}</div>
+      </div>
+      <div class="popup-details">
+        <div class="detail-row">
+          <span class="detail-label">Route Progress:</span>
+          <span class="detail-value">${progressPercent}% along route</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Distance from Route:</span>
+          <span class="detail-value">${distanceFromRoute}m</span>
+        </div>
+        ${place.tags && place.tags.addr_full ? `
+          <div class="detail-row">
+            <span class="detail-label">Address:</span>
+            <span class="detail-value">${place.tags.addr_full}</span>
+          </div>
+        ` : ''}
+        ${place.tags && place.tags.phone ? `
+          <div class="detail-row">
+            <span class="detail-label">Phone:</span>
+            <span class="detail-value">📞 ${place.tags.phone}</span>
+          </div>
+        ` : ''}
+        ${place.tags && place.tags.website ? `
+          <div class="detail-row">
+            <span class="detail-label">Website:</span>
+            <span class="detail-value">🌐 ${place.tags.website}</span>
+          </div>
+        ` : ''}
+        ${place.tags && place.tags.opening_hours ? `
+          <div class="detail-row">
+            <span class="detail-label">Hours:</span>
+            <span class="detail-value">🕒 ${place.tags.opening_hours}</span>
+          </div>
+        ` : ''}
+      </div>
+      <div class="popup-actions">
+        <button class="primary-btn" onclick="navigateToLandmark(${place.lat}, ${place.lon})">📍 Navigate</button>
+        <button class="secondary-btn" onclick="addToFavorites('${place.id}')">❤️ Save</button>
+      </div>
+    </div>
+  `;
+
+  // Bind popup with enhanced styling
+  marker.bindPopup(popupContent, { 
+    className: 'enhanced-popup',
+    maxWidth: 300,
+    minWidth: 250,
+    closeButton: true,
+    autoClose: false,
+    closeOnClick: false
+  });
+
+  // Enhanced popup event handling
+  marker.on('popupopen', () => onPopupOpen(marker.getPopup()));
+  marker.on('popupclose', onPopupClose);
+
+  // Enhanced hover interactions
+  marker.on('mouseover', () => {
+    lastHoveredMarker = marker;
+    
+    // Show popup on hover after a short delay
+    setTimeout(() => {
+      if (lastHoveredMarker === marker && !marker.isPopupOpen()) {
+        marker.openPopup();
+      }
+    }, 300);
+  });
+
+  marker.on('mouseout', () => {
+    if (lastHoveredMarker === marker) {
+      lastHoveredMarker = null;
+    }
+    
+    // Close popup after delay if not clicked
+    if (marker.isPopupOpen() && marker.getPopup() !== currentOpenPopup) {
+      closePopupAfterDelay(marker.getPopup(), 1000);
+    }
+  });
+
+  // Enhanced click handling
+  marker.on('click', () => {
+    // Ensure popup stays open on click
+    if (!marker.isPopupOpen()) {
+      marker.openPopup();
+    }
+    
+    // Highlight corresponding item in info box
+    highlightInfoBoxItem(place.id);
+  });
+
+  return marker;
+}
+
+// Function to highlight corresponding item in info box
+function highlightInfoBoxItem(placeId) {
+  try {
+    const infoBox = document.getElementById('info-box');
+    if (!infoBox) return;
+    
+    // Remove previous highlights
+    infoBox.querySelectorAll('.cat-list li').forEach(item => {
+      item.classList.remove('highlighted');
+    });
+    
+    // Find and highlight the corresponding item
+    const listItem = infoBox.querySelector(`[data-place-id="${placeId}"]`);
+    if (listItem) {
+      listItem.classList.add('highlighted');
+      listItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  } catch (error) {
+    console.error('Error highlighting info box item:', error);
+  }
+}
+
+// Function to navigate to landmark (placeholder for future implementation)
+function navigateToLandmark(lat, lng) {
+  // This could open Google Maps, Apple Maps, or other navigation apps
+  const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+  window.open(url, '_blank');
+}
+
+// Function to add landmark to favorites (placeholder for future implementation)
+function addToFavorites(placeId) {
+  console.log('Adding to favorites:', placeId);
+  // This could save to localStorage or send to backend
+  alert('Favorite feature coming soon!');
 }

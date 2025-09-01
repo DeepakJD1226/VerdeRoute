@@ -158,32 +158,111 @@
       <div class="form-group">
         <input type="text" id="destination" placeholder="Enter Destination" />
       </div>
-      <div class="form-group">
-        <select id="vehicleType">
-          <option value="petrol">Petrol Car</option>
-          <option value="diesel">Diesel Car</option>
-          <option value="electric">Electric Car</option>
-          <option value="bike">Bike/Motorcycle</option>
-          <option value="bus">Bus</option>
-          <option value="truck">Truck</option>
-          <option value="electric_truck">Electric Truck</option>
-          <option value="walking">Walking</option>
-          <option value="cycling">Cycling</option>
-        </select>
+      
+      <!-- Vehicle Information Section -->
+      <div class="form-section">
+        <h4 class="section-title">🚗 Vehicle Information</h4>
+        <div class="form-group">
+          <select id="vehicleType">
+            <option value="car">Car</option>
+            <option value="bike">Bike/Motorcycle</option>
+            <option value="bus">Bus</option>
+            <option value="truck">Truck</option>
+            <option value="electric">Electric Vehicle</option>
+            <option value="hybrid">Hybrid Vehicle</option>
+            <option value="walking">Walking</option>
+            <option value="cycling">Cycling</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <select id="fuelType">
+            <option value="petrol">Petrol/Gasoline</option>
+            <option value="diesel">Diesel</option>
+            <option value="cng">CNG</option>
+            <option value="lpg">LPG</option>
+            <option value="ethanol">Ethanol</option>
+            <option value="electric">Electric</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <input type="number" id="modelYear" placeholder="Model Year (e.g., 2020)" min="1980" max="2025" />
+        </div>
+        <div class="form-group">
+          <input type="number" id="engineSizeLiters" placeholder="Engine Size (Liters)" min="0.5" max="20" step="0.1" />
+          <small class="field-hint">e.g., 1.6L, 2.0L, 3.5L - affects fuel consumption calculations</small>
+        </div>
       </div>
-      <div class="form-group">
-  <input type="number" id="vehicleYear" placeholder="Enter Vehicle Make Year" min="1980" max="2025" />
-</div>
 
-      <div class="form-group">
-        <button onclick="findRoute()">Find Route</button>
+      <!-- Trip Details Section -->
+      <div class="form-section">
+        <h4 class="section-title">🗺️ Trip Details</h4>
+        <div class="form-group">
+          <select id="routeType">
+            <option value="city">City</option>
+            <option value="highway">Highway</option>
+            <option value="city_and_highway">City and Highway</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <select id="traffic">
+            <option value="normal">Normal Traffic</option>
+            <option value="stop_and_go">Stop & Go Traffic</option>
+            <option value="light">Light Traffic</option>
+          </select>
+        </div>
       </div>
-      <div class="form-group">
-        <small style="color: #16a34a; font-weight: bold; display: block; margin-bottom: 5px;">🌿 Discover green places along your route!</small>
-        <button onclick="findTouristRoute()" class="tourist-btn">🌿 Find Tourist Route</button>
+
+      <!-- Vehicle Condition Section -->
+      <div class="form-section">
+        <h4 class="section-title">🔧 Vehicle Condition</h4>
+        <div class="form-group">
+          <input type="number" id="loadFactor" placeholder="Load Factor (1.0 = normal)" min="0.5" max="3.0" step="0.1" value="1.0" />
+          <small class="field-hint">1.0 = normal load, 1.5 = 50% extra load, 2.0 = double load</small>
+        </div>
+        <div class="form-group">
+          <input type="number" id="claimedEfficiency" placeholder="Claimed Efficiency" min="0.1" step="0.1" />
+          <small class="field-hint">Leave empty to use default values, or enter your vehicle's official efficiency rating</small>
+        </div>
+        <div class="form-group">
+          <select id="claimedEfficiencyUnit">
+            <option value="l_per_100km">L/100km</option>
+            <option value="km_per_liter">km/L</option>
+            <option value="mpg">MPG</option>
+            <option value="kwh_per_100km">kWh/100km</option>
+            <option value="wh_per_km">Wh/km</option>
+            <option value="kg_per_100km">kg/100km</option>
+          </select>
+        </div>
       </div>
-      <div class="form-group">
-        <button onclick="showHome()">⬅ Back to Home</button>
+
+      <!-- Energy Source Section -->
+      <div class="form-section">
+        <h4 class="section-title">⚡ Energy Source</h4>
+        <div class="form-group">
+          <select id="electricitySource">
+            <option value="grid_avg">Grid Average</option>
+            <option value="coal">Coal</option>
+            <option value="gas">Natural Gas</option>
+            <option value="hydro">Hydroelectric</option>
+            <option value="wind">Wind</option>
+            <option value="solar">Solar</option>
+            <option value="nuclear">Nuclear</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="button-container">
+        <div class="form-group">
+          <button onclick="findRoute()">🚗 Calculate Route & Emissions</button>
+        </div>
+        <div class="form-group">
+          <small style="color: #16a34a; font-weight: bold; display: block; margin-bottom: 5px;">🌿 Discover green places along your route!</small>
+          <button onclick="debugTouristRoute()" class="tourist-btn" id="touristBtn">🌿 Find Tourist Route</button>
+        </div>
+        <div class="form-group">
+          <button onclick="showHome()">⬅ Back to Home</button>
+        </div>
       </div>
     </div>
     <div id="map"></div>
@@ -191,11 +270,187 @@
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="emissionCalculator.js"></script>
   <script src="map.js"></script>
   <script>
     function showContent(id) {
       document.querySelectorAll('.step-content').forEach(div => div.classList.remove('active'));
       document.getElementById(id).classList.add('active');
+    }
+
+    // Smart form field dependencies and validation
+    function initializeSmartForm() {
+      console.log('Initializing smart form...');
+      const vehicleType = document.getElementById('vehicleType');
+      const fuelType = document.getElementById('fuelType');
+      const electricitySource = document.getElementById('electricitySource');
+      const claimedEfficiency = document.getElementById('claimedEfficiency');
+      const claimedEfficiencyUnit = document.getElementById('claimedEfficiencyUnit');
+      const engineSizeLiters = document.getElementById('engineSizeLiters');
+      
+      console.log('Form elements found:', {
+        vehicleType: vehicleType,
+        fuelType: fuelType,
+        electricitySource: electricitySource,
+        claimedEfficiency: claimedEfficiency,
+        claimedEfficiencyUnit: claimedEfficiencyUnit,
+        engineSizeLiters: engineSizeLiters
+      });
+      
+      // Vehicle type change handler
+      vehicleType.addEventListener('change', function() {
+        const type = this.value;
+        console.log('Vehicle type changed to:', type);
+        
+        // Update fuel type options based on vehicle type
+        if (type === 'electric') {
+          fuelType.value = 'electric';
+          fuelType.disabled = true;
+          electricitySource.parentElement.style.display = 'block';
+          engineSizeLiters.parentElement.style.display = 'none';
+        } else if (type === 'hybrid') {
+          fuelType.value = 'hybrid';
+          fuelType.disabled = true;
+          electricitySource.parentElement.style.display = 'none';
+          engineSizeLiters.parentElement.style.display = 'block';
+        } else {
+          fuelType.disabled = false;
+          electricitySource.parentElement.style.display = 'none';
+          engineSizeLiters.parentElement.style.display = 'block';
+          
+          // Reset fuel type to petrol for non-electric vehicles
+          if (fuelType.value === 'electric') {
+            fuelType.value = 'petrol';
+          }
+        }
+        
+        // Update efficiency unit options
+        updateEfficiencyUnits(type);
+      });
+      
+      // Fuel type change handler
+      fuelType.addEventListener('change', function() {
+        const fuel = this.value;
+        console.log('Fuel type changed to:', fuel);
+        if (fuel === 'electric') {
+          electricitySource.parentElement.style.display = 'block';
+        } else {
+          electricitySource.parentElement.style.display = 'none';
+        }
+      });
+      
+      // Efficiency unit change handler
+      claimedEfficiencyUnit.addEventListener('change', function() {
+        const unit = this.value;
+        console.log('Efficiency unit changed to:', unit);
+        if (unit === 'kwh_per_100km' || unit === 'wh_per_km') {
+          fuelType.value = 'electric';
+          vehicleType.value = 'electric';
+        }
+      });
+      
+      // Real-time validation
+      const inputs = document.querySelectorAll('.form-section input, .form-section select');
+      console.log('Found inputs for validation:', inputs.length);
+      inputs.forEach(input => {
+        input.addEventListener('blur', validateField);
+        input.addEventListener('input', clearValidation);
+      });
+      
+      // Initialize form state
+      vehicleType.dispatchEvent(new Event('change'));
+      console.log('Smart form initialization complete');
+    }
+    
+    function updateEfficiencyUnits(vehicleType) {
+      const efficiencyUnit = document.getElementById('claimedEfficiencyUnit');
+      const currentValue = efficiencyUnit.value;
+      
+      if (vehicleType === 'electric') {
+        efficiencyUnit.innerHTML = `
+          <option value="kwh_per_100km">kWh/100km</option>
+          <option value="wh_per_km">Wh/km</option>
+        `;
+      } else if (vehicleType === 'bike') {
+        efficiencyUnit.innerHTML = `
+          <option value="l_per_100km">L/100km</option>
+          <option value="km_per_liter">km/L</option>
+          <option value="mpg">MPG</option>
+        `;
+      } else {
+        efficiencyUnit.innerHTML = `
+          <option value="l_per_100km">L/100km</option>
+          <option value="km_per_liter">km/L</option>
+          <option value="mpg">MPG</option>
+        `;
+      }
+      
+      // Try to restore previous value if it's still valid
+      if (efficiencyUnit.querySelector(`option[value="${currentValue}"]`)) {
+        efficiencyUnit.value = currentValue;
+      }
+    }
+    
+    function validateField(event) {
+      const field = event.target;
+      const value = field.value.trim();
+      const formGroup = field.closest('.form-group');
+      
+      // Remove previous validation states
+      formGroup.classList.remove('success', 'error');
+      
+      // Basic validation
+      if (field.hasAttribute('required') && !value) {
+        formGroup.classList.add('error');
+        return false;
+      }
+      
+      // Number validation
+      if (field.type === 'number' && value) {
+        const num = parseFloat(value);
+        const min = parseFloat(field.min);
+        const max = parseFloat(field.max);
+        
+        if (isNaN(num) || (min && num < min) || (max && num > max)) {
+          formGroup.classList.add('error');
+          return false;
+        }
+      }
+      
+      // Year validation
+      if (field.id === 'modelYear' && value) {
+        const year = parseInt(value);
+        const currentYear = new Date().getFullYear();
+        if (year < 1980 || year > currentYear) {
+          formGroup.classList.add('error');
+          return false;
+        }
+      }
+      
+      // If we get here, validation passed
+      if (value) {
+        formGroup.classList.add('success');
+      }
+      
+      return true;
+    }
+    
+    function clearValidation(event) {
+      const formGroup = event.target.closest('.form-group');
+      formGroup.classList.remove('success', 'error');
+    }
+    
+    function validateForm() {
+      const inputs = document.querySelectorAll('.form-section input, .form-section select');
+      let isValid = true;
+      
+      inputs.forEach(input => {
+        if (!validateField({ target: input })) {
+          isValid = false;
+        }
+      });
+      
+      return isValid;
     }
 
     // Load recent routes
@@ -221,10 +476,27 @@
       }
     }
 
+    // Debug function for tourist route
+    function debugTouristRoute() {
+      console.log('Tourist route button clicked!');
+      console.log('Checking if findTouristRoute function exists:', typeof findTouristRoute);
+      
+      if (typeof findTouristRoute === 'function') {
+        console.log('Calling findTouristRoute...');
+        findTouristRoute();
+      } else {
+        console.error('findTouristRoute function not found!');
+        alert('Tourist route function not available. Please check the console for errors.');
+      }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
       loadRecent();
       const refreshBtn = document.getElementById('refreshRecent');
       if (refreshBtn) refreshBtn.addEventListener('click', loadRecent);
+      
+      // Initialize smart form functionality
+      initializeSmartForm();
 
       // Theme toggle
       const toggle = document.getElementById('themeToggle');
